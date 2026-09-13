@@ -11,7 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-0078d4" alt="Platform" />
-  <img src="https://img.shields.io/badge/Version-1.0.0-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-1.2.0-blue" alt="Version" />
   <img src="https://img.shields.io/badge/UI-Tauri%202-24c8db" alt="Tauri" />
   <img src="https://img.shields.io/badge/Backend-Rust-orange" alt="Rust" />
 </p>
