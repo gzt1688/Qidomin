@@ -1,0 +1,49 @@
+[package]
+name = "qidomin"
+version = "1.2.0"
+description = "Qidomin - 让桌面回归秩序"
+edition = "2021"
+
+[lib]
+name = "qidomin_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+dirs = "5"
+chrono = "0.4"
+# Win32_System_DataExchange：搜索面板「粘贴」要读剪贴板里的文件列表（CF_HDROP）
+# Win32_UI_Accessibility：SetWinEventHook 监听窗口 z 序变化（「显示桌面」把桌面窗口
+# 抬到最前的瞬间立刻唤醒守护线程，消除"闪一下"）
+# Win32_Graphics_Dwm：DwmGetWindowAttribute 查窗口是否被 cloak（UWP 挂起等不可见窗口
+# 不能算「面板压住的普通窗口」，否则守护会白白下沉）
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Accessibility", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Registry", "Win32_Media_Audio", "Win32_System_Ole", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_SystemServices", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_IO", "Win32_System_Ioctl"] }
+# `#[implement]` 宏展开出来的代码走 `windows_core::` 路径，必须能直接按这个名字找到
+windows-core = "0.61"
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"
+# 监控"关联文件夹"对应的真实目录，里面增删文件时实时刷新分区
+notify = "6"
+# 用系统原生 TLS 而不是 rustls：部分行情服务器发完响应直接断连、不发送 close_notify，
+# rustls 会判定为错误，schannel / SChannel 则按正常结束处理。
+# **注意**：ureq 2.x 里 native-tls 只是一个“适配器”，不会自动成为默认后端，
+# 必须在 AgentBuilder 上显式 `.tls_connector(...)`，否则所有 https 请求直接报
+# “cannot make HTTPS request because no TLS backend is configured”（见 stock.rs::http_agent）。
+ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
+# 腾讯行情（qt.gtimg.cn）返回 GBK，股票名称是中文，需要解码
+encoding_rs = "0.8"
+# 搜索面板「粘贴」按钮：读系统剪贴板文本
+arboard = "3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

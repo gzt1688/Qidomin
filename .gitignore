@@ -1,0 +1,13 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+.rustup/
+.cargo/
+.vssetup*.log
+*.db
+__pycache__/
+.workbuddy/
+.arts/
+.codeartsdoer/
+DeskBox参考/
