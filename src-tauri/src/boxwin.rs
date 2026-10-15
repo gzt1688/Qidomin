@@ -149,13 +149,31 @@ fn persist_cfg(window: &WebviewWindow, box_id: i64, force: bool) {
     let visible = window.is_visible().unwrap_or(true);
     // 只改几何字段，且在 DB 的同一把锁内读-改-写（见 Db::update_box_window_cfg）：
     // 前端刚保存的图标大小/视图模式/手排顺序不会被覆盖，并发写也不会互相丢更新。
+    //
+    // 胶囊模式（collapsed = true）下只跟踪 x/y，**不覆盖 w/h**：此时窗口是悬停
+    // 临时展开 / 胶囊尺寸，真正要保住的是 expanded_geom（收起前的几何）。
+    // 若照常写 w/h，悬停展开会把"展开尺寸"当成"分区尺寸"写进 cfg，展开语义就乱了。
+    //
+    // 多屏绑定：把窗口中心点所在屏的硬件身份（PnP 实例路径）和屏内比例位置
+    // 一起写进配置。下次启动 / 分辨率变了 / 屏幕排列换了，分区都按
+    // "归属屏 + 比例"找回自己的位置，而不是靠绝对坐标硬凑。
+    let (cx, cy) = (x + w / 2, y + h / 2);
+    let mon = monitor_at_point(cx, cy);
+    let rel = mon.as_ref().map(|m| rel_pos(m.work, x, y, w, h));
+    let mon_key = mon.map(|m| m.key);
     let db = app.state::<Db>();
     let _ = db.update_box_window_cfg(box_id, |c| {
         c.x = x;
         c.y = y;
-        c.w = w;
-        c.h = h;
+        if !c.collapsed {
+            c.w = w;
+            c.h = h;
+        }
         c.visible = visible;
+        if let Some(key) = mon_key {
+            c.monitor_key = key;
+            c.rel = rel;
+        }
     });
 }
 
@@ -1657,11 +1675,18 @@ pub fn place_box_menu(
 /// 矩形 (x, y, w, h)，物理像素
 type Rect = (i32, i32, i32, i32);
 
-/// 一块显示器：完整范围 + 工作区（已去掉任务栏）
-#[derive(Clone, Copy)]
+/// 一块显示器：完整范围 + 工作区（已去掉任务栏）+ 硬件身份
+#[derive(Clone)]
 struct MonInfo {
     monitor: Rect,
     work: Rect,
+    /// 显示输出的 PnP 实例路径（如 `DELA0A1\5&10a58c63&0&UID4353`）。
+    ///
+    /// 这是分区"属于哪块屏"的锚点。不能用窗口系统给的 `\\.\DISPLAYn`：
+    /// 那个编号随启动顺序 / 拔插重排（这次启动 DISPLAY2 是那台竖屏，
+    /// 下次启动就可能是 DISPLAY1），当身份用必然串屏。
+    /// PnP 实例路径由显示器型号 + 接口实例构成，同一台机器同一接口下跨重启稳定。
+    key: String,
 }
 
 /// 枚举所有显示器。
@@ -1671,12 +1696,19 @@ struct MonInfo {
 /// GDI 这几个调用是无状态的，任何线程都能安全用。
 #[cfg(target_os = "windows")]
 fn all_monitors() -> Vec<MonInfo> {
-    use windows::core::BOOL;
+    use windows::core::{BOOL, PCWSTR};
     use windows::Win32::Foundation::{LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{
-        EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
+        EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, DISPLAY_DEVICEW, HDC, HMONITOR,
+        MONITORINFO, MONITORINFOEXW,
     };
 
+    /// 从显示器设备名（`\\.\DISPLAY2`）查显示输出的 PnP 实例路径。
+    ///
+    /// GetMonitorInfoW 只给设备名，那是会重排的；EnumDisplayDevicesW 的
+    /// `DeviceID` 才是"这台显示器插在这个接口上"的稳定身份（`DELA0A1\5&…&UID4353`）。
+    /// 拿不到（驱动异常等）就退回设备名 —— 退化的身份总比没有强，
+    /// 但这种 key 跨重启可能串屏，属兜底行为。
     unsafe extern "system" fn collect(
         hmon: HMONITOR,
         _hdc: HDC,
@@ -1684,26 +1716,63 @@ fn all_monitors() -> Vec<MonInfo> {
         data: LPARAM,
     ) -> BOOL {
         let out = unsafe { &mut *(data.0 as *mut Vec<MonInfo>) };
-        let mut mi = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            rcMonitor: RECT::default(),
-            rcWork: RECT::default(),
-            dwFlags: 0,
-        };
-        if unsafe { GetMonitorInfoW(hmon, &mut mi).as_bool() } {
+        let mut miex = MONITORINFOEXW::default();
+        miex.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        // GetMonitorInfoW 按 cbSize 识别实际类型，传 MONITORINFOEXW 能拿到 szDevice
+        if unsafe {
+            GetMonitorInfoW(
+                hmon,
+                &mut miex as *mut MONITORINFOEXW as *mut MONITORINFO,
+            )
+            .as_bool()
+        } {
+            let device_name: Vec<u16> = miex
+                .szDevice
+                .iter()
+                .take_while(|&&c| c != 0)
+                .copied()
+                .collect();
+            let mut key = String::new();
+            if !device_name.is_empty() {
+                let mut dd = DISPLAY_DEVICEW::default();
+                dd.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+                let ok = unsafe {
+                    EnumDisplayDevicesW(
+                        PCWSTR(device_name.as_ptr()),
+                        0,
+                        &mut dd,
+                        0,
+                    )
+                    .as_bool()
+                };
+                if ok {
+                    let id: String = String::from_utf16_lossy(
+                        &dd.DeviceID.iter().take_while(|&&c| c != 0).copied().collect::<Vec<_>>(),
+                    );
+                    // DeviceID 形如 `DELA0A1\5&10a58c63&0&UID4353`（PnP 实例路径，稳定）
+                    if !id.trim().is_empty() {
+                        key = id.trim().to_string();
+                    }
+                }
+            }
+            if key.is_empty() {
+                // 兜底：设备名（\\.\DISPLAYn）。会重排，但同一次会话内够用
+                key = String::from_utf16_lossy(&device_name);
+            }
             out.push(MonInfo {
                 monitor: (
-                    mi.rcMonitor.left,
-                    mi.rcMonitor.top,
-                    mi.rcMonitor.right - mi.rcMonitor.left,
-                    mi.rcMonitor.bottom - mi.rcMonitor.top,
+                    miex.monitorInfo.rcMonitor.left,
+                    miex.monitorInfo.rcMonitor.top,
+                    miex.monitorInfo.rcMonitor.right - miex.monitorInfo.rcMonitor.left,
+                    miex.monitorInfo.rcMonitor.bottom - miex.monitorInfo.rcMonitor.top,
                 ),
                 work: (
-                    mi.rcWork.left,
-                    mi.rcWork.top,
-                    mi.rcWork.right - mi.rcWork.left,
-                    mi.rcWork.bottom - mi.rcWork.top,
+                    miex.monitorInfo.rcWork.left,
+                    miex.monitorInfo.rcWork.top,
+                    miex.monitorInfo.rcWork.right - miex.monitorInfo.rcWork.left,
+                    miex.monitorInfo.rcWork.bottom - miex.monitorInfo.rcWork.top,
                 ),
+                key,
             });
         }
         BOOL(1) // 非 0 = 继续枚举
@@ -1784,6 +1853,38 @@ fn work_area_at(x: i32, y: i32) -> Rect {
         .unwrap_or((0, 0, 1920, 1040))
 }
 
+/// 点 (x,y) 所在的那块显示器（含硬件身份）。找不着返回 None。
+fn monitor_at_point(x: i32, y: i32) -> Option<MonInfo> {
+    all_monitors().into_iter().find(|m| {
+        let (ox, oy) = overlap_size((x, y, 1, 1), m.monitor);
+        ox > 0 && oy > 0
+    })
+}
+
+/// 窗口在所属屏工作区内的**比例位置**：0 = 贴左/上，1 = 贴右/下。
+///
+/// 存比例而不是存"属于第几块屏 + 像素偏移"，是为了同时扛住两类变化：
+/// 分辨率改了 → 比例不变，分区回到同一台屏上近似原来的位置；
+/// 多屏排列互换（A↔B）→ 分区跟着屏幕的硬件身份走，不会串到别的屏。
+fn rel_pos(wa: Rect, x: i32, y: i32, w: i32, h: i32) -> [f64; 2] {
+    let dx = (wa.2 - w).max(1) as f64;
+    let dy = (wa.3 - h).max(1) as f64;
+    [
+        ((x - wa.0) as f64 / dx).clamp(0.0, 1.0),
+        ((y - wa.1) as f64 / dy).clamp(0.0, 1.0),
+    ]
+}
+
+/// 比例位置 → 该屏工作区里的绝对位置（窗口自身尺寸不变）
+fn abs_from_rel(wa: Rect, rel: [f64; 2], w: i32, h: i32) -> (i32, i32) {
+    let dx = (wa.2 - w).max(0) as f64;
+    let dy = (wa.3 - h).max(0) as f64;
+    (
+        wa.0 + (dx * rel[0].clamp(0.0, 1.0)).round() as i32,
+        wa.1 + (dy * rel[1].clamp(0.0, 1.0)).round() as i32,
+    )
+}
+
 /// 把窗口夹进某块工作区（窗口比工作区还大时就贴左上角）。
 fn clamp_into(wa: Rect, x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
     let (left, top, ww, hh) = wa;
@@ -1861,6 +1962,17 @@ const MIN_BOX_H: i32 = 100;
 /// 新分区 / 几何配置不可用时的默认窗口尺寸。
 const DEFAULT_BOX_W: i32 = 330;
 const DEFAULT_BOX_H: i32 = 250;
+/// 胶囊模式的窗口尺寸（**逻辑**像素；建窗 / 收起时乘 scale factor 变物理像素）。
+const CAPSULE_W: f64 = 150.0;
+const CAPSULE_H: f64 = 34.0;
+
+/// 胶囊尺寸（物理像素）。
+fn capsule_size(sf: f64) -> (i32, i32) {
+    (
+        (CAPSULE_W * sf).round().max(40.0) as i32,
+        (CAPSULE_H * sf).round().max(24.0) as i32,
+    )
+}
 
 /// 由配置决定窗口几何：`(w, h, visible, locked, 配置是否不可用)`。
 ///
@@ -1896,6 +2008,19 @@ fn resolve_box_geometry(
 ) -> (i32, i32, bool) {
     let (w, h) = (w.max(MIN_BOX_W), h.max(MIN_BOX_H));
     if let Some(c) = cfg {
+        // 分区绑定了显示器（多屏场景）：按硬件身份找回它归属的那块屏，
+        // 用比例位置落位 —— 分辨率改了 / 显示器排列换了，分区都跟着自己的屏走。
+        // 找不到（这台屏现在没接）才落到下面的通用兜底。
+        if !c.monitor_key.is_empty() {
+            if let Some(rel) = c.rel {
+                if let Some(mon) = all_monitors().iter().find(|m| m.key == c.monitor_key) {
+                    let (x, y) = abs_from_rel(mon.work, rel, w, h);
+                    let (x, y) = clamp_into(mon.work, x, y, w, h);
+                    return (x, y, false);
+                }
+                // 归属的屏不在了：继续用绝对坐标走兜底（大概率整块在外 → 重新安置）
+            }
+        }
         // 用户自己摆好的位置优先，原样保留
         if rect_reachable(c.x, c.y, w, h) {
             return (c.x, c.y, false);
@@ -1951,7 +2076,23 @@ fn open_box_window_with_cfg(
     // "碎片窗口"。它若还处于锁定状态，既不能拖也不能改大小，而标题栏的解锁按钮
     // 早已被挤出可视区，用户就彻底动不了它（"等于卡死在那"）。
     // 所以尺寸不合法时按"没配置过"处理：默认尺寸 + 重新安置到工作区空位。
-    let (w, h, visible, locked, degenerate) = box_size_from_cfg(cfg.as_ref());
+    //
+    // 胶囊模式例外：收起的分区本来就只有胶囊那么大（w/h 远小于下限是**有意为之**），
+    // 不能走上面的"退化兜底"——否则每次重启都会把胶囊放大成默认尺寸。
+    // 此时按胶囊尺寸建窗（下面建好后按 scale factor 校正物理尺寸），
+    // 展开几何从 expanded_geom 恢复，cfg.w/h 不参与。
+    let collapsed = cfg.as_ref().map(|c| c.collapsed).unwrap_or(false);
+    let (w, h, visible, locked, degenerate) = if collapsed {
+        (
+            CAPSULE_W as i32,
+            CAPSULE_H as i32,
+            cfg.as_ref().map(|c| c.visible).unwrap_or(true),
+            cfg.as_ref().map(|c| c.locked).unwrap_or(false),
+            false,
+        )
+    } else {
+        box_size_from_cfg(cfg.as_ref())
+    };
     if degenerate && cfg.is_some() {
         crate::log_msg(&format!(
             "分区 {box_id} 的窗口尺寸配置不合法（小于 {MIN_BOX_W}×{MIN_BOX_H}），\
@@ -1995,15 +2136,25 @@ fn open_box_window_with_cfg(
         .visible(false)
         .build()
         .map_err(|e| format!("创建分区窗口失败: {e}"))?;
-    // 锁定的分区连原生边框拉伸也要禁掉（前端手柄已隐藏，这里是窗口样式这一层）
-    if locked {
+    // 锁定的分区连原生边框拉伸也要禁掉（前端手柄已隐藏，这里是窗口样式这一层）；
+    // 胶囊同理 —— 胶囊不允许被原生拉伸，尺寸只在收起/展开时由代码控制
+    if locked || collapsed {
         let _ = win.set_resizable(false);
     }
     let _ = win.set_position(PhysicalPosition::new(x, y));
-    let _ = win.set_size(PhysicalSize::new(
-        w.max(MIN_BOX_W) as u32,
-        h.max(MIN_BOX_H) as u32,
-    ));
+    // 胶囊：按本机 scale factor 折算物理尺寸（builder 里塞的是逻辑像素估算值）。
+    // 普通分区：配置存的就是物理像素，直接用（下限兜底防退化）。
+    if collapsed {
+        if let Ok(sf) = win.scale_factor() {
+            let (cw, ch) = capsule_size(sf);
+            let _ = win.set_size(PhysicalSize::new(cw.max(1) as u32, ch.max(1) as u32));
+        }
+    } else {
+        let _ = win.set_size(PhysicalSize::new(
+            w.max(MIN_BOX_W) as u32,
+            h.max(MIN_BOX_H) as u32,
+        ));
+    }
     // 应用内界面缩放：内容等比放大，图标网格 auto-fill 自动重排
     crate::apply_ui_zoom(&win);
 
@@ -2261,6 +2412,84 @@ pub fn persist_all_geometry(app: &AppHandle) {
     }
 }
 
+/// 收起 / 展开分区（胶囊模式）。
+///
+/// 收起：把当前几何存进 `expanded_geom`，窗口缩成胶囊并禁掉原生拉伸。
+/// 展开：按 `expanded_geom` 恢复几何（缺失时退回 cfg 的 x/y/w/h）。
+/// 已是目标状态时直接返回成功（幂等）——否则"重复收起"会把胶囊尺寸
+/// 当成展开几何存进去，展开后就再也回不到原来的大小了。
+///
+/// 悬停临时展开不走这里：那只是前端把窗口临时放大，`collapsed` 标记不动，
+/// 关闭 / 重启后仍按胶囊恢复（见 BoxWindow 前端的 doHoverExpand）。
+pub fn set_box_collapsed(app: &AppHandle, box_id: i64, collapsed: bool) -> Result<(), String> {
+    let bw = app.state::<BoxWindows>();
+    let label = bw
+        .label_for(box_id)
+        .ok_or_else(|| "分区窗口不存在".to_string())?;
+    let win = app
+        .get_webview_window(&label)
+        .ok_or_else(|| "分区窗口不存在".to_string())?;
+    let db = app.state::<Db>();
+    let cfg = db
+        .get_box_window_cfg(box_id)?
+        .unwrap_or_else(|| BoxWindowCfg::new(box_id));
+
+    if collapsed {
+        if cfg.collapsed {
+            return Ok(());
+        }
+        let pos = win.outer_position().map_err(|e| e.to_string())?;
+        let size = win.outer_size().map_err(|e| e.to_string())?;
+        let sf = win.scale_factor().unwrap_or(1.0);
+        let (cw, ch) = capsule_size(sf);
+        db.update_box_window_cfg(box_id, |c| {
+            c.collapsed = true;
+            c.expanded_geom = Some([pos.x, pos.y, size.width as i32, size.height as i32]);
+            c.w = cw;
+            c.h = ch;
+        })?;
+        let _ = win.set_resizable(false);
+        // 只缩不挪：胶囊留在原分区的左上角，用户对"它在哪"的预期不变
+        let _ = win.set_size(PhysicalSize::new(cw.max(1) as u32, ch.max(1) as u32));
+        persist_cfg(&win, box_id, true);
+    } else {
+        if !cfg.collapsed {
+            return Ok(());
+        }
+        // 展开几何：优先 expanded_geom；没有（历史遗留数据）就退回 cfg 的 x/y/w/h
+        let (gx, gy, gw, gh) = match cfg.expanded_geom {
+            Some([x, y, w, h]) => (x, y, w, h),
+            None => (cfg.x, cfg.y, cfg.w, cfg.h),
+        };
+        let (nw, nh) = (gw.max(MIN_BOX_W), gh.max(MIN_BOX_H));
+        // 恢复前把位置夹回工作区：收起期间显示器可能被拔掉 / 改过分辨率，
+        // 直接还原会把分区留在屏幕外（用户看到的就是"展开了但找不到"）
+        let wa = work_area_at(gx + nw / 2, gy + nh / 2);
+        let (nx, ny) = clamp_into(wa, gx, gy, nw, nh);
+        db.update_box_window_cfg(box_id, |c| {
+            c.collapsed = false;
+            c.expanded_geom = None;
+            c.x = nx;
+            c.y = ny;
+            c.w = nw;
+            c.h = nh;
+        })?;
+        let _ = win.set_position(PhysicalPosition::new(nx, ny));
+        let _ = win.set_size(PhysicalSize::new(nw.max(1) as u32, nh.max(1) as u32));
+        if !cfg.locked {
+            let _ = win.set_resizable(true);
+        }
+        persist_cfg(&win, box_id, true);
+    }
+    // 通知前端按新状态重渲染（胶囊 <-> 完整分区）
+    let _ = app.emit_to(
+        &label,
+        "box-capsule-changed",
+        serde_json::json!({ "boxId": box_id, "collapsed": collapsed }),
+    );
+    Ok(())
+}
+
 /// 托盘开关：最小化 / 恢复全部分区与组件。
 ///
 /// - **隐藏（最小化）**：把当前可见的分区、组件全部藏起来，并记录一份可见快照；
@@ -2272,7 +2501,7 @@ pub fn toggle_all_boxes(app: &AppHandle) {
     static SNAP: OnceLock<Mutex<Option<(Vec<i64>, Vec<&'static str>)>>> = OnceLock::new();
     let store = SNAP.get_or_init(|| Mutex::new(None));
     let mut snap = store.lock().unwrap();
-    let widgets: [&str; 4] = ["notes", "stocks", "huangli", "poetry"];
+    let widgets: [&str; 6] = ["notes", "stocks", "huangli", "poetry", "huangdi", "shanghan"];
 
     // 已处于"最小化"状态 → 按快照恢复
     if let Some((boxes, ws)) = snap.take() {
@@ -2323,7 +2552,7 @@ pub fn toggle_all_boxes(app: &AppHandle) {
         }
     }
     // 组件菜单是独立窗口，跟着一起收起，别留个孤儿浮在上面
-    for kind in ["notes", "stock", "huangli", "poetry"] {
+    for kind in ["notes", "stock", "huangli", "poetry", "huangdi", "shanghan"] {
         if let Some(win) = app.get_webview_window(&format!("wmenu-{kind}")) {
             let _ = win.hide();
         }

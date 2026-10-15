@@ -19,6 +19,7 @@ import {
   renameFile,
   saveBoxWindowCfg,
   setAbsorbCfg,
+  setBoxCollapsed,
   setBoxLink,
   setBoxSort,
   showBoxBackgroundMenu,
@@ -43,6 +44,11 @@ function errText(e: unknown): string {
   if (e instanceof Error) return e.message;
   return String(e);
 }
+
+/** 胶囊尺寸（逻辑像素）。必须与后端 boxwin.rs 的 CAPSULE_W / CAPSULE_H 一致：
+ *  悬停临时展开/收起由前端直接改窗口尺寸，两边数字对不上就会越收越大。 */
+const CAPSULE_W = 150;
+const CAPSULE_H = 34;
 
 /** 两个图标列表是否完全一致（顺序 + 关键字段）。内容没变就复用旧数组引用。 */
 function sameIconItems(a: IconItem[], b: IconItem[]): boolean {
@@ -331,6 +337,121 @@ export default function BoxWindow({ boxId }: { boxId: number }) {
       un.then((f) => f());
     };
   }, [boxId, showToast]);
+
+  // ---------- 胶囊模式 ----------
+  // cfg.collapsed = true 时窗口收成小胶囊。三种展开路径：
+  //  1. 点击胶囊 → 永久展开（后端 set_box_collapsed(false) 恢复几何、清 collapsed）
+  //  2. 悬停胶囊 → 临时展开（前端直接把窗口放大到 expandedGeom，配置仍是"已收起"，
+  //     重启后还是胶囊）；鼠标离开窗口 1.2s 后自动缩回
+  //  3. 分区菜单「展开」→ 同路径 1
+  const [tempExpanded, setTempExpanded] = useState(false);
+  const hoverOpenTimer = useRef<number | null>(null);
+  const hoverCloseTimer = useRef<number | null>(null);
+  /** 胶囊按下位置：pointerup 时区分"点击展开"和"拖动结束"（拖动不展开） */
+  const capsuleDown = useRef<{ x: number; y: number } | null>(null);
+
+  const clearHoverTimers = useCallback(() => {
+    if (hoverOpenTimer.current != null) {
+      window.clearTimeout(hoverOpenTimer.current);
+      hoverOpenTimer.current = null;
+    }
+    if (hoverCloseTimer.current != null) {
+      window.clearTimeout(hoverCloseTimer.current);
+      hoverCloseTimer.current = null;
+    }
+  }, []);
+
+  useEffect(() => clearHoverTimers, [clearHoverTimers]);
+
+  /** 悬停临时展开：放大到收起前的几何。expandedGeom 缺失（老数据）就不动，点击仍可用。 */
+  const doHoverExpand = useCallback(() => {
+    const g = cfgRef.current.expandedGeom;
+    if (!g) return;
+    getCurrentWindow()
+      .setSize(new PhysicalSize(g[2], g[3]))
+      .then(() => setTempExpanded(true))
+      .catch(() => {});
+  }, []);
+
+  /** 临时收起：窗口缩回胶囊尺寸（配置不动，仍是"已收起"） */
+  const doHoverCollapse = useCallback(() => {
+    getCurrentWindow()
+      .scaleFactor()
+      .then((sf) =>
+        getCurrentWindow().setSize(
+          new PhysicalSize(Math.round(CAPSULE_W * sf), Math.round(CAPSULE_H * sf))
+        )
+      )
+      .catch(() => {})
+      .finally(() => setTempExpanded(false));
+  }, []);
+
+  /** 鼠标悬上胶囊 → 延迟 500ms 自动临时展开（设置里关掉"悬停展开"就只响应点击） */
+  const scheduleHoverExpand = useCallback(() => {
+    clearHoverTimers();
+    if (cfgRef.current.capsuleHover === false) return;
+    hoverOpenTimer.current = window.setTimeout(() => {
+      hoverOpenTimer.current = null;
+      doHoverExpand();
+    }, 500);
+  }, [clearHoverTimers, doHoverExpand]);
+
+  // 临时展开期间：鼠标真正离开窗口（relatedTarget 为空）才开始收起倒计时，
+  // 回到窗口内或按下鼠标都取消 —— "交互中绝不收起"，移出了才收。
+  useEffect(() => {
+    if (!tempExpanded) return;
+    const startClose = () => {
+      if (hoverCloseTimer.current != null) return;
+      hoverCloseTimer.current = window.setTimeout(() => {
+        hoverCloseTimer.current = null;
+        doHoverCollapse();
+      }, 1200);
+    };
+    const cancelClose = () => {
+      if (hoverCloseTimer.current != null) {
+        window.clearTimeout(hoverCloseTimer.current);
+        hoverCloseTimer.current = null;
+      }
+    };
+    const onOut = (e: MouseEvent) => {
+      if (!e.relatedTarget) startClose();
+    };
+    const onOver = () => cancelClose();
+    const onDown = () => cancelClose();
+    document.addEventListener("mouseout", onOut);
+    document.addEventListener("mouseover", onOver);
+    document.addEventListener("pointerdown", onDown);
+    return () => {
+      document.removeEventListener("mouseout", onOut);
+      document.removeEventListener("mouseover", onOver);
+      document.removeEventListener("pointerdown", onDown);
+      cancelClose();
+    };
+  }, [tempExpanded, doHoverCollapse]);
+
+  /** 点击胶囊：永久展开（几何由后端恢复），完成后按数据库真值刷新 */
+  const expandPermanently = useCallback(() => {
+    clearHoverTimers();
+    setTempExpanded(false);
+    setBoxCollapsed(boxId, false)
+      .then(() => load())
+      .catch((e) => console.error("展开分区失败", e));
+  }, [boxId, clearHoverTimers, load]);
+
+  // 后端 set_box_collapsed 完成后会广播状态（展开/收起互相切换时同步本地视图）
+  useEffect(() => {
+    const un = listen<{ boxId: number; collapsed: boolean }>("box-capsule-changed", (e) => {
+      if (e.payload.boxId !== boxId) return;
+      if (e.payload.collapsed) {
+        clearHoverTimers();
+        setTempExpanded(false);
+      }
+      load();
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, [boxId, load, clearHoverTimers]);
 
   useEffect(() => {
     if (!editing) return;
@@ -808,12 +929,22 @@ export default function BoxWindow({ boxId }: { boxId: number }) {
 
   const doOrganize = useCallback(async () => {
     try {
-      await organizeBox(boxId);
+      const r = await organizeBox(boxId);
+      // 以前失败直接吞掉（"我点了整理但没反应"）。现在给出数量和第一条原因。
+      if (r.failed > 0) {
+        const first = r.errors?.[0] ?? "";
+        showToast(
+          `${r.moved} 个已移出，${r.failed} 个失败${first ? `：${first}` : ""}`,
+          true
+        );
+      } else if (r.moved > 0) {
+        showToast(`已移出 ${r.moved} 个不匹配文件`, false);
+      }
       load();
-    } catch {
-      /* ignore */
+    } catch (e) {
+      showToast(`整理失败：${errText(e)}`, true);
     }
-  }, [boxId, load]);
+  }, [boxId, load, showToast]);
 
   /**
    * 解散分区 —— **一步到位，不再有任何确认弹窗**。
@@ -1111,6 +1242,26 @@ export default function BoxWindow({ boxId }: { boxId: number }) {
         case "locked":
           updateCfg({ locked: a.value });
           break;
+        // 收起 / 展开（胶囊模式）。注意悬停临时展开期间配置已是"已收起"，
+        // 此时再点"收起"不能走 setBoxCollapsed —— 后端幂等直接返回、窗口不会缩，
+        // 得由前端把窗口缩回胶囊尺寸（doHoverCollapse）。
+        case "collapse":
+          if (tempExpanded) {
+            doHoverCollapse();
+          } else {
+            setBoxCollapsed(boxId, true)
+              .then(() => load())
+              .catch((e) => console.error("收起分区失败", e));
+          }
+          break;
+        case "expand":
+          setBoxCollapsed(boxId, false)
+            .then(() => load())
+            .catch((e) => console.error("展开分区失败", e));
+          break;
+        case "capsuleHover":
+          updateCfg({ capsuleHover: a.value });
+          break;
         case "absorb":
           openAbsorb();
           break;
@@ -1137,6 +1288,9 @@ export default function BoxWindow({ boxId }: { boxId: number }) {
     openAbsorb,
     doOrganize,
     doDelete,
+    tempExpanded,
+    doHoverCollapse,
+    load,
   ]);
 
   // 标题栏自适应：窄→收起项数，更窄→连搜索框一起收起。
@@ -1154,6 +1308,48 @@ export default function BoxWindow({ boxId }: { boxId: number }) {
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  // 胶囊态：只渲染一条小胶囊。点击 → 永久展开；悬停 → 自动临时展开
+  // （窗口尺寸由前端调整，tempExpanded=true 后走下面的完整渲染）。
+  // 菜单/后端切换收起状态时会 emit box-capsule-changed，reload() 后自然走到这里。
+  // 用户把分区背景调成全透明时胶囊会"隐形"，这里给背景色兜底一个最低透明度。
+  if (cfg.collapsed && !tempExpanded) {
+    const capsuleStyle = {
+      ...bgStyle,
+      "--box-bg": hexToRgba(bg.color, Math.max(bgAlpha, 0.55)),
+      "--box-bg-hover": hexToRgba(bg.color, Math.max(bgAlpha, 0.8)),
+    } as React.CSSProperties;
+    return (
+      <div
+        className={`box-capsule ${dragOver ? "drag-over" : ""}`}
+        style={capsuleStyle}
+        onPointerDown={(e) => {
+          // 记下按下位置：pointerup 时区分"点击"和"拖动结束"（拖完不该展开）
+          capsuleDown.current = { x: e.screenX, y: e.screenY };
+          onHeaderDown(e);
+        }}
+        onPointerMove={onHeaderMove}
+        onPointerUp={(e) => {
+          onHeaderUp(e);
+          const p = capsuleDown.current;
+          capsuleDown.current = null;
+          if (p && Math.abs(e.screenX - p.x) < 6 && Math.abs(e.screenY - p.y) < 6) {
+            expandPermanently();
+          }
+        }}
+        onPointerEnter={scheduleHoverExpand}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          openBoxMenu(boxId).catch(() => {});
+        }}
+      >
+        <span className="box-capsule-dot" style={{ background: box?.color || "#15b6c9" }} />
+        <span className="box-capsule-title">{box?.name || "分区"}</span>
+        <span className="box-capsule-count">{items.length}</span>
+      </div>
+    );
+  }
 
   return (
     <div

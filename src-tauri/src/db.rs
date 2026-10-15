@@ -34,6 +34,28 @@ pub struct BoxWindowCfg {
     /// 图标网格垂直间距（px），默认 6
     #[serde(default = "default_gap_y")]
     pub gap_y: i32,
+    /// 胶囊模式：true = 当前收起为小胶囊。收起期间 `w`/`h` 是胶囊尺寸，
+    /// 展开前的真实几何存 [`Self::expanded_geom`]。
+    #[serde(default)]
+    pub collapsed: bool,
+    /// 收起为胶囊前的窗口几何 [x, y, w, h]（物理像素），展开时按它恢复。
+    #[serde(default)]
+    pub expanded_geom: Option<[i32; 4]>,
+    /// 悬停胶囊时是否自动临时展开（默认 true；false = 只能点击展开）
+    #[serde(default = "default_capsule_hover")]
+    pub capsule_hover: bool,
+    /// 分区归属显示器的硬件身份（显示输出的 PnP 实例路径）。
+    /// 空 = 未绑定（老数据 / 从备份恢复），几何完全按 x/y 绝对坐标处理。
+    #[serde(default)]
+    pub monitor_key: String,
+    /// 分区在归属屏工作区内的比例位置 [rx, ry]（0=贴左/上，1=贴右/下）。
+    /// 与 monitor_key 配合：分辨率变了 / 屏幕排列换了也能找回原来的位置。
+    #[serde(default)]
+    pub rel: Option<[f64; 2]>,
+}
+
+fn default_capsule_hover() -> bool {
+    true
 }
 
 fn default_gap_x() -> i32 {
@@ -74,6 +96,11 @@ impl BoxWindowCfg {
             item_order: Vec::new(),
             gap_x: 6,
             gap_y: 6,
+            collapsed: false,
+            expanded_geom: None,
+            capsule_hover: true,
+            monitor_key: String::new(),
+            rel: None,
         }
     }
 }
@@ -497,6 +524,14 @@ impl Db {
                  to_path TEXT NOT NULL,
                  moved_at TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS organize_log (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 batch_id TEXT NOT NULL,
+                 from_path TEXT NOT NULL,
+                 to_path TEXT NOT NULL,
+                 created_at TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_organize_log_batch ON organize_log(batch_id);
              CREATE TABLE IF NOT EXISTS notes (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  content TEXT NOT NULL DEFAULT '',
@@ -918,6 +953,89 @@ impl Db {
     pub fn delete_move_history(&self, id: i64) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM move_history WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    // ---------- 整理批次日志（自动整理的撤销依据） ----------
+
+    /// 记一批整理动作。`from`/`to` 都是**精确路径**，撤销时按它们原路搬回。
+    pub fn organize_log_insert_batch(
+        &self,
+        batch_id: &str,
+        items: &[(String, String)],
+    ) -> Result<(), String> {
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO organize_log (batch_id, from_path, to_path, created_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                )
+                .map_err(|e| e.to_string())?;
+            for (from, to) in items {
+                stmt.execute(params![batch_id, from, to, now])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// 最近一次整理批次：(batch_id, 文件数, 时间)。没有任何整理记录时返回 None。
+    pub fn latest_organize_batch(&self) -> Result<Option<(String, i64, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT batch_id, COUNT(*), MAX(created_at) FROM organize_log
+                 GROUP BY batch_id ORDER BY MAX(created_at) DESC, batch_id DESC LIMIT 1",
+            )
+            .map_err(|e| e.to_string())?;
+        let row = stmt
+            .query_row([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(row)
+    }
+
+    /// 取一批整理记录的 (from, to)，按写入顺序返回。
+    pub fn organize_batch_items(&self, batch_id: &str) -> Result<Vec<(String, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT from_path, to_path FROM organize_log
+                 WHERE batch_id = ?1 ORDER BY id ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![batch_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(items)
+    }
+
+    /// 批次撤销完成后删掉它（搬不动的条目也一起删：重试只会重复失败）。
+    pub fn organize_log_delete_batch(&self, batch_id: &str) -> Result<(), String> {
+        self.conn
+            .lock()
+            .map_err(|e| e.to_string())?
+            .execute(
+                "DELETE FROM organize_log WHERE batch_id = ?1",
+                params![batch_id],
+            )
             .map_err(|e| e.to_string())?;
         Ok(())
     }

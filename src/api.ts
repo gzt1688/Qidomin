@@ -11,6 +11,9 @@ import type {
   Note,
   NoteTab,
   NoteWindowCfg,
+  OrganizeCommitItem,
+  OrganizeCommitResult,
+  OrganizePlan,
   OrganizeResult,
   RuleInfo,
   ShanghanWindowCfg,
@@ -109,6 +112,30 @@ export function organizeDesktop(): Promise<OrganizeResult> {
   return invoke("organize_desktop");
 }
 
+/**
+ * 自动整理预览：只算"谁会被搬到哪"，不动任何文件。
+ * 返回 items（可执行清单）和 busy（正在写入、本轮跳过的文件）。
+ * 用户在预览对话框里确认（可取消勾选）后再调 organizeDesktopCommit。
+ */
+export function organizeDesktopPlan(): Promise<OrganizePlan> {
+  return invoke("organize_desktop_plan");
+}
+
+/** 执行用户确认过的整理清单，返回批次 id 供撤销 */
+export function organizeDesktopCommit(items: OrganizeCommitItem[]): Promise<OrganizeCommitResult> {
+  return invoke("organize_desktop_commit", { items });
+}
+
+/** 撤销最近一次整理（按批次记录原路搬回），返回 [搬回数, 批次总数] */
+export function undoLastOrganize(): Promise<[number, number]> {
+  return invoke("undo_last_organize");
+}
+
+/** 最近一次整理批次的信息（batchId、文件数、时间），没有则为 null */
+export function getLastOrganizeBatch(): Promise<[string, number, string] | null> {
+  return invoke("get_last_organize_batch");
+}
+
 export function organizeBox(boxId: number): Promise<OrganizeResult> {
   return invoke("organize_box", { boxId });
 }
@@ -149,6 +176,35 @@ export function saveBoxWindowCfg(cfg: BoxWindowCfg): Promise<void> {
 
 export function setBoxVisible(id: number, visible: boolean): Promise<void> {
   return invoke("set_box_visible", { id, visible });
+}
+
+/**
+ * 收起 / 展开分区（胶囊模式）。
+ * 收起时后端记住展开几何并缩成胶囊；展开时按记录恢复。
+ * 悬停临时展开不走这里（前端直接改窗口尺寸，配置保持"已收起"）。
+ */
+export function setBoxCollapsed(id: number, collapsed: boolean): Promise<void> {
+  return invoke("set_box_collapsed", { id, collapsed });
+}
+
+/** 托盘右键菜单动作（toggle/add/organize/settings/quit），见 TrayMenuWindow.tsx */
+export function trayMenuAction(action: string): Promise<void> {
+  return invoke("tray_menu_action", { action });
+}
+
+/** 托盘菜单前端心跳：把 WebView 存活状态打到后端日志 */
+export function trayMenuPing(reason: string): Promise<void> {
+  return invoke("tray_menu_ping", { reason });
+}
+
+/** 收起托盘菜单（后端把窗口挪到屏幕外；窗口常驻，WebView 不挂起） */
+export function trayMenuDismiss(): Promise<void> {
+  return invoke("tray_menu_dismiss");
+}
+
+/** 切换开机自启（写注册表 Run 键） */
+export function setAutoStartEnabled(enable: boolean): Promise<void> {
+  return invoke("set_auto_start_enabled", { enable });
 }
 
 export function startBoxDrag(boxId: number, forceMoved: boolean): Promise<void> {

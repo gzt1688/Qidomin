@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import SettingsView from "./components/SettingsView";
+import OrganizePreview from "./components/OrganizePreview";
 
 export default function App() {
   const [statusText, setStatusText] = useState("");
@@ -39,6 +40,9 @@ export default function App() {
       </div>
 
       <SettingsView notify={notify} refreshKey={refreshKey} onChange={setRefreshKey} />
+
+      {/* 托盘"一键整理" / 鼠标热键触发的整理预览（plan → 确认 → commit → undo） */}
+      <OrganizePreview notify={notify} />
 
       <div className={`status-bar ${statusKind}`}>{statusText}</div>
     </div>

@@ -5,6 +5,7 @@ import {
   applyShortcutArrowForced,
   clearIndex,
   exportLayout,
+  getLastOrganizeBatch,
   getHuangdiEnabled,
   getHuangliEnabled,
   getNotesEnabled,
@@ -25,6 +26,7 @@ import {
   setShortcutArrowHidden,
   setStocksEnabled,
   startMouseCapture,
+  undoLastOrganize,
 } from "../api";
 import { FILE_CATEGORIES } from "../fileCategories";
 import type { AppSettings, MouseBinding } from "../types";
@@ -36,7 +38,50 @@ interface SettingsViewProps {
   onChange: (updater: (k: number) => number) => void;
 }
 
-const APP_VERSION = "V1.2-2026-9-14";
+/** 设置页里的"撤销上次整理"小行：显示最近批次信息，点击原路搬回 */
+function UndoOrganizeRow({
+  notify,
+}: {
+  notify: (text: string, kind: "ok" | "err" | "") => void;
+}) {
+  const [info, setInfo] = useState<[string, number, string] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    getLastOrganizeBatch()
+      .then(setInfo)
+      .catch(() => {});
+  }, []);
+
+  const doUndo = useCallback(async () => {
+    setBusy(true);
+    try {
+      const [back, total] = await undoLastOrganize();
+      notify(`已撤销：${back}/${total} 个文件回到原位`, back === total ? "ok" : "err");
+      setInfo(null);
+    } catch (e) {
+      notify(`撤销失败：${String(e)}`, "err");
+    } finally {
+      setBusy(false);
+    }
+  }, [notify]);
+
+  if (!info) {
+    return <span style={{ fontSize: 12, color: "var(--text-sub)" }}>最近没有整理记录</span>;
+  }
+  return (
+    <span className="radio-row" style={{ alignItems: "center" }}>
+      <span style={{ fontSize: 12, color: "var(--text-sub)" }}>
+        {info[1]} 个文件（{info[2]}）
+      </span>
+      <button className="btn small" disabled={busy} onClick={doUndo}>
+        {busy ? "撤销中…" : "撤销"}
+      </button>
+    </span>
+  );
+}
+
+const APP_VERSION = "V1.3-2026-10-15";
 
 type TabKey = "basic" | "search" | "widgets" | "hotkeys" | "about";
 
@@ -744,8 +789,7 @@ export default function SettingsView({ notify, refreshKey }: SettingsViewProps) 
       <div className="settings-wrap">
       {tab === "basic" && (
       <>
-      {/* ===== 基本设置 ===== */}
-      <div className="section-title">基本设置</div>
+      {/* ===== 基本设置（页签名已说明内容，不再重复渲染标题） ===== */}
       <table className="data-table">
         <tbody>
           <tr>
@@ -845,6 +889,17 @@ export default function SettingsView({ notify, refreshKey }: SettingsViewProps) 
           </tr>
           <tr>
             <td>
+              撤销上次整理
+              <div style={{ fontSize: 12, color: "var(--text-sub)" }}>
+                把最近一次「一键整理」移动的文件按记录搬回原位
+              </div>
+            </td>
+            <td>
+              <UndoOrganizeRow notify={notify} />
+            </td>
+          </tr>
+          <tr>
+            <td>
               去掉图标小箭头
               <div style={{ fontSize: 12, color: "var(--text-sub)" }}>
                 失效时点强制生效
@@ -904,7 +959,7 @@ export default function SettingsView({ notify, refreshKey }: SettingsViewProps) 
             </td>
             <td>
               <span className="radio-row">
-                {[1, 1.25, 1.5, 1.75, 2].map((z) => (
+                {[1, 1.25, 1.5, 1.75].map((z) => (
                   <label key={z} className="radio-item">
                     <input
                       type="radio"
@@ -961,8 +1016,6 @@ export default function SettingsView({ notify, refreshKey }: SettingsViewProps) 
 
       {tab === "search" && (
       <>
-      {/* ===== 搜索索引 ===== */}
-      <div className="section-title">搜索索引</div>
       <table className="data-table">
         <tbody>
           <tr>
@@ -1090,8 +1143,6 @@ export default function SettingsView({ notify, refreshKey }: SettingsViewProps) 
 
       {tab === "widgets" && (
       <>
-      {/* ===== 组件（桌面小组件） ===== */}
-      <div className="section-title">组件（桌面小组件）</div>
       <table className="data-table">
         <tbody>
           <tr>
@@ -1240,7 +1291,6 @@ export default function SettingsView({ notify, refreshKey }: SettingsViewProps) 
         </div>
       )}
       {/* ===== 鼠标快捷键 ===== */}
-      <div className="section-title">鼠标快捷键</div>
       <table className="data-table">
         <tbody>
           <tr>
@@ -1384,57 +1434,47 @@ export default function SettingsView({ notify, refreshKey }: SettingsViewProps) 
 
       {tab === "about" && (
       <>
-      {/* ===== 关于 ===== */}
-      <div className="section-title">关于</div>
+      {/* ===== 关于：刻意极简 —— 打赏码放最前面，打开页签不用滚动就能看见 ===== */}
       <div className="about-card">
         <div className="about-head">
           <div className="about-logo">净</div>
           <div>
             <div className="about-name">净界 Qidomin</div>
-            <div className="about-ver">{APP_VERSION} · 桌面分区整理</div>
+            <div className="about-ver">
+              {APP_VERSION} · 桌面分区整理 · 开源免费，本地运行，数据存本机
+            </div>
           </div>
         </div>
 
-        <p className="about-desc">
-          Qidomin取名来自福州话（擦桌面）同音。净界是一款面向 Windows 的桌面整理工具。
-          核心就一句话：让桌面更干净。分区可以自由拖动、缩放、
-          吸附对齐；同时内置便签、股票、黄历等桌面小组件，整理与实用两不误。
-          程序完全本地运行，规则与数据都存在本机，不联网也能用。
-        </p>
+        {/* 打赏：左文右码，码放白底上保证任何主题下都清晰可扫 */}
+        <div className="about-donate">
+          <div className="about-donate-text">
+            <div className="about-donate-title">请作者喝杯咖啡 ☕</div>
+            <div className="about-donate-sub">
+              微信 / 支付宝扫码打赏，金额随意，心意最重。
+              <br />
+              打赏不会解锁任何功能——净界永远完整免费。
+            </div>
+          </div>
+          <img
+            className="about-donate-qr"
+            src="/donate-qr.png"
+            alt="收款打赏码"
+            draggable={false}
+          />
+        </div>
 
-        <ul className="about-feats">
-          <li>
-            <b>桌面分区</b>：透明悬浮分区，可拖动 / 缩放 / 相互吸附对齐，位置、大小、背景自动记忆
-          </li>
-          <li>
-            <b>一键整理</b>：按扩展名、关键字、大小、修改日期自动把文件归入指定分区
-          </li>
-          <li>
-            <b>吸附同类</b>：把一个文件拖进分区，桌面上的同类文件自动跟着进来
-          </li>
-          <li>
-            <b>分区管理</b>：新建 / 重命名 / 改色 / 调透明度 / 改图标大小 / 锁定，右键即用
-          </li>
-          <li>
-            <b>桌面组件</b>：便签（带提醒闹钟）、自选股实时行情、黄历（农历 · 节气 · 宜忌）
-          </li>
-          <li>
-            <b>快速搜索</b>：全盘文件名索引，输入即搜毫秒级返回；范围多选、按类型
-            （图片 / 文档 / 压缩包 / 3D模型 等）过滤，USN Journal 实时增量更新
-          </li>
-          <li>
-            <b>系统优化</b>：一键去掉快捷方式左下角小箭头、开机自动启动
-          </li>
-          <li>
-            <b>布局备份</b>：分区、窗口、规则与设置一键导出 JSON，重装系统后快速恢复
-          </li>
-        </ul>
+        {/* 开源免费声明：压缩成一段，不打扰打赏区的第一屏位置 */}
+        <div className="about-opensource">
+          <p>
+            净界是一款<b>开源免费软件</b>：无广告、不推广、不上传数据，任何人都可以自由使用与分享。
+            开发维护全凭兴趣，你的每一笔打赏都是对作者最直接的支持，谢谢！
+          </p>
+        </div>
 
         <div className="about-meta">
-          <span>版本：<b>{APP_VERSION}</b></span>
-          <span>运行方式：<b>本地运行，数据存本机</b></span>
-          <span>技术架构：<b>Tauri 2 + Rust + React</b></span>
           <span>© 2026-9-11 @桂枝汤QQ363899135-净界 Qidomin</span>
+          <span>技术架构：Tauri 2 + Rust + React</span>
         </div>
       </div>
       </>

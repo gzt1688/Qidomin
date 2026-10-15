@@ -823,6 +823,34 @@ pub fn organize_desktop(db: State<Db>) -> Result<OrganizeResult, String> {
     engine::organize_desktop(&db)
 }
 
+/// 自动整理**预览**：只算"谁会被搬到哪"，不动任何文件。
+/// 前端弹预览对话框，用户确认（可取消勾选）后再调 organize_desktop_commit。
+#[tauri::command]
+pub fn organize_desktop_plan(db: State<Db>) -> Result<engine::OrganizePlan, String> {
+    engine::plan_organize_desktop(&db)
+}
+
+/// 执行用户确认过的整理清单，返回批次 id 供撤销。
+#[tauri::command]
+pub fn organize_desktop_commit(
+    db: State<Db>,
+    items: Vec<engine::OrganizeCommitItem>,
+) -> Result<engine::OrganizeCommitResult, String> {
+    engine::commit_organize_desktop(&db, &items)
+}
+
+/// 撤销最近一次整理：按批次记录原路搬回，返回 (搬回数, 批次总数)。
+#[tauri::command]
+pub fn undo_last_organize(db: State<Db>) -> Result<(u32, u32), String> {
+    engine::undo_last_organize(&db)
+}
+
+/// 最近一次整理批次的信息，没有则为 null。
+#[tauri::command]
+pub fn get_last_organize_batch(db: State<Db>) -> Result<Option<(String, i64, String)>, String> {
+    engine::last_organize_info(&db)
+}
+
 #[tauri::command]
 pub fn organize_box(db: State<Db>, box_id: i64) -> Result<OrganizeResult, String> {
     engine::organize_box(&db, box_id)
@@ -1404,6 +1432,14 @@ fn import_layout_db(
                 item_order: Vec::new(),
                 gap_x: 6,
                 gap_y: 6,
+                // 备份/恢复始终落在"展开态"：expanded_geom 是临时状态，不跨备份
+                collapsed: false,
+                expanded_geom: None,
+                capsule_hover: true,
+                // 屏幕绑定不进备份：恢复时显示器拓扑可能完全不同，
+                // 带着旧绑定反而会把分区摆到错误的位置
+                monitor_key: String::new(),
+                rel: None,
             });
         }
     }
@@ -1682,6 +1718,80 @@ pub fn save_box_window_cfg(
 #[tauri::command]
 pub fn set_box_visible(app: AppHandle, id: i64, visible: bool) -> Result<(), String> {
     boxwin::set_box_visible(&app, id, visible)
+}
+
+/// 托盘菜单窗口前端的心跳打点：挂载完成 / 每次弹出收到通知时调用。
+/// 用于确认 WebView 是否活着 —— hide→show 循环后 WebView2 渲染挂起时，
+/// 后端明明 show 了但用户看不到，靠这条日志区分"前端死了"还是"窗口没显示"。
+#[tauri::command]
+pub fn tray_menu_ping(reason: String) -> Result<(), String> {
+    crate::touch_tray_menu_heartbeat();
+    crate::log_msg(&format!("tray-menu 前端心跳：{reason}"));
+    Ok(())
+}
+
+/// 收起托盘菜单（挪屏幕外，窗口常驻）。前端点菜单项 / 按 Esc 后调用——
+/// 前端不能再 hide() 自己：hide 会让 WebView 挂起，下次弹出可能不渲染。
+#[tauri::command]
+pub fn tray_menu_dismiss(app: AppHandle) -> Result<(), String> {
+    crate::tray_menu_dismiss(&app);
+    Ok(())
+}
+
+/// 托盘右键菜单（自绘 Win11 风格窗口，见 TrayMenuWindow.tsx）的动作分发。
+/// 原生 HMENU 菜单已移除，菜单项逻辑全部收拢到这里。
+///
+/// **必须是 `async fn`**：同步命令跑在主线程上，而这些动作都要抢数据库锁
+/// （`add` → `next_box_name`，`settings` → `show_main` → `apply_ui_zoom` → `ui_zoom`）。
+/// 搜索索引重建期间那把锁会被持十几秒（实测 17s），主线程一旦跟着卡住，
+/// Windows 就会把应用判为未响应并**停止向托盘图标投递点击**（ghost 化）——
+/// 表现就是"点一次新建分区/设置，菜单就再也弹不出来"。
+/// 声明成 async 后命令体在异步运行时的线程上跑，主线程照常泵消息。
+#[tauri::command]
+pub async fn tray_menu_action(app: AppHandle, db: State<'_, Db>, action: String) -> Result<(), String> {
+    // 入口日志：这条出现 = invoke 链路（前端→capability→后端）全通；
+    // 用户点了菜单但日志没有这条 = 问题在前端或 capability，不在命令逻辑
+    crate::log_msg(&format!("tray-menu 动作：{action}"));
+    // Db 内部是 Arc<Mutex<Connection>>，克隆只加引用计数、不复制连接，
+    // 正好用来把库句柄带出 State<'_>（async 命令里不能持有跨 await 的借用）。
+    let db = db.inner().clone();
+    match action.as_str() {
+        "toggle" => {
+            boxwin::toggle_all_boxes(&app);
+            Ok(())
+        }
+        "add" => {
+            let name = crate::next_box_name(&db);
+            crate::create_box_and_open(&app, &db, &name, "#15b6c9").map(|_| ())
+        }
+        "settings" => {
+            crate::show_main(&app);
+            Ok(())
+        }
+        "organize" => {
+            // 与原托盘菜单一致：带出主窗口 + 发预览请求，确认后才真正搬
+            crate::show_main(&app);
+            app.emit("organize-request", ())
+                .map_err(|e| e.to_string())
+        }
+        "quit" => {
+            crate::quit_app(&app);
+            Ok(())
+        }
+        _ => Err(format!("未知的托盘菜单动作：{action}")),
+    }
+}
+
+/// 切换开机自启（托盘菜单里的开关项）。
+#[tauri::command]
+pub fn set_auto_start_enabled(enable: bool) -> Result<(), String> {
+    engine::set_auto_start(enable)
+}
+
+/// 收起 / 展开分区（胶囊模式）。几何保存与恢复见 [`boxwin::set_box_collapsed`]。
+#[tauri::command]
+pub fn set_box_collapsed(app: AppHandle, id: i64, collapsed: bool) -> Result<(), String> {
+    boxwin::set_box_collapsed(&app, id, collapsed)
 }
 
 /// 吸附候选矩形 + 阈值：其它分区 / 其它组件 / 屏幕工作区，物理像素。

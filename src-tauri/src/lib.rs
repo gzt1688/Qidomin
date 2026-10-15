@@ -27,9 +27,8 @@ use db::Db;
 /// 退出守卫进程的入口（见 [`session`]）：主进程被强杀时由它把文件还回桌面
 pub use session::run_exit_guard;
 use tauri::{
-    menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Listener, Manager,
+    AppHandle, Emitter, Listener, Manager,
 };
 
 /// 简易文件日志（用于卡死问题定位，写入 %APPDATA%\com.qidomin.app\qidomin.log）
@@ -280,14 +279,23 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
 }
 
 /// 读取应用内「界面缩放」（设置页可调，1.0 = 100%）。非法值回退 1.0。
+///
+/// 上限 `MAX_UI_ZOOM`：设置页只提供到 175%（2.0 那档已下掉）。这里一并夹住，
+/// 否则老配置里存着 2.0 的用户会既看不到对应单选项（界面上像坏了），
+/// 又继续被按 200% 渲染。
 pub fn ui_zoom(app: &AppHandle) -> f64 {
     app.try_state::<Db>()
         .and_then(|db| db.get_setting("app").ok().flatten())
         .and_then(|s| serde_json::from_str::<crate::commands::AppSettings>(&s).ok())
         .map(|x| x.ui_zoom)
         .filter(|z| (0.5..=3.0).contains(z))
+        // 老配置存过 2.0（200% 那档已下掉）→ 平滑收到上限，别硬夹成别的值
+        .map(|z| z.min(MAX_UI_ZOOM))
         .unwrap_or(1.0)
 }
+
+/// 设置页可选的最大界面缩放（175%）。改这里要同步 SettingsView.tsx 里的档位数组。
+pub const MAX_UI_ZOOM: f64 = 1.75;
 
 /// 对窗口应用界面缩放：WebView 内容整体放大（等价于浏览器缩放）。
 /// 固定尺寸窗口（设置 760x680 / 搜索 540x380）同步放大窗口本身，
@@ -441,6 +449,8 @@ pub(crate) enum SearchAnchor {
 
 /// 托盘左键单击 / 鼠标快捷键：切换搜索框（已显示则收起，否则弹出）。
 pub(crate) fn show_search(app: &AppHandle, anchor: SearchAnchor) {
+    // 入口日志：区分"托盘左键事件没到"和"搜索窗口自身问题"
+    log_msg("搜索面板：show_search 触发");
     // 窗口实际尺寸会随界面缩放放大（见 apply_ui_zoom），定位常量同步跟随
     let zoom = ui_zoom(app);
     let search_w = 540.0 * zoom;
@@ -449,6 +459,7 @@ pub(crate) fn show_search(app: &AppHandle, anchor: SearchAnchor) {
         Ok(window) => {
             // 已显示则收起（再次触发切换）
             if window.is_visible().unwrap_or(false) {
+                log_msg("搜索面板：已可见 → 收起（toggle）");
                 let _ = window.hide();
                 return;
             }
@@ -527,6 +538,9 @@ pub(crate) fn show_search(app: &AppHandle, anchor: SearchAnchor) {
                             y = mp.y;
                         }
                         let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+                        log_msg(&format!(
+                            "搜索面板：托盘锚点定位 ({x},{y})，尺寸 {w_phys}x{h_phys}"
+                        ));
                     }
                 }
             }
@@ -602,104 +616,489 @@ fn handle_add_box_args(app: &AppHandle, db: &Db, args: &[String]) {
     }
 }
 
-fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     // 防御：清理可能存在的历史托盘，确保任务栏始终只有一个图标。
     // "main" 是 tauri.conf.json 里 trayIcon 配置自动创建的默认 id（现已移除，
     // 这里保留清理以防旧配置/旧实例残留），"main-tray" 是本函数上一次创建的同名托盘。
     let _ = app.remove_tray_by_id("main");
     let _ = app.remove_tray_by_id("main-tray");
-    let toggle = MenuItem::with_id(app, "toggle", "最小化/恢复全部分区与组件", true, None::<&str>)?;
-    let add = MenuItem::with_id(app, "add", "新建分区", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
-    let organize = MenuItem::with_id(app, "organize", "一键整理", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(
-        app,
-        &[&toggle, &add, &settings, &organize, &quit],
-    )?;
+    // 菜单不再用 Tauri 的原生 HMENU（Windows 上样式老旧、无法定制），
+    // 改为右键弹出自绘的 Win11 风格菜单窗口（见 show_tray_menu / TrayMenuWindow.tsx）。
     TrayIconBuilder::with_id("main-tray")
         .icon(app.default_window_icon().expect("missing app icon").clone())
         .tooltip("Qidomin")
-        .menu(&menu)
-        .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id.as_ref() {
-            "toggle" => boxwin::toggle_all_boxes(app),
-            "add" => {
-                let db = app.state::<Db>();
-                let name = next_box_name(&db);
-                let _ = create_box_and_open(app, &db, &name, "#15b6c9");
-            }
-            "settings" => show_main(app),
-            "organize" => {
-                let db = app.state::<Db>();
-                let _ = engine::organize_desktop(&db);
-            }
-            "quit" => {
-                // 先销"正常退出"标记，再做落盘/归还（这一步可能被打断或失败，
-                // 但只要标记没了，下次启动就会按搬运记录把文件收回分区）
-                session::mark_clean_exit();
-                // 退出前把分区窗口的最终几何强制落盘（节流可能丢最后一帧），
-                // 保证重启后的布局和退出那一刻一致
-                boxwin::persist_all_geometry(app);
-                // 退出前把分区里的文件归还桌面：程序没开的时候桌面是"正常"的，
-                // 下次启动再按移动记录收回来（engine::reorganize_from_history）
-                let db = app.state::<Db>();
-                let n = match engine::return_all_to_desktop(&db) {
-                    Ok(n) => {
-                        log_msg(&format!("退出归还文件：{n} 个"));
-                        n
-                    }
-                    Err(e) => {
-                        log_msg(&format!("return_all_to_desktop failed: {e}"));
-                        0
-                    }
-                };
-                if n > 0 {
-                    shellicon::refresh_desktop_icons();
-                }
-                // 标记在进这条分支时就已经销掉了（见上）：守卫进程看到标记没了就不会再动文件
-                app.exit(0);
-            }
-            _ => {}
-        })
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                rect,
-                position,
-                ..
-            } = event
-            {
-                let handle = tray.app_handle();
-                // tauri 的 Rect 是"物理/逻辑"枚举；Windows 上托盘给的是物理像素，
-                // 真出现逻辑值就按主屏缩放换算（缩放只影响这一种情况）。
-                let sf = handle
-                    .primary_monitor()
-                    .ok()
-                    .flatten()
-                    .map(|m| m.scale_factor())
-                    .unwrap_or(1.0);
-                let pos = rect.position.to_physical::<i32>(sf);
-                let size = rect.size.to_physical::<u32>(sf);
-                // 面板水平中心对到图标中心；上下沿用来决定贴在图标上方还是下方。
-                // 万一拿不到图标矩形（宽为 0），退回光标位置，至少不会甩到屏幕另一头。
-                let (cx, top, bottom) = if size.width > 0 {
-                    (
-                        pos.x + size.width as i32 / 2,
-                        pos.y,
-                        pos.y + size.height as i32,
-                    )
-                } else {
-                    let x = position.x.round() as i32;
-                    let y = position.y.round() as i32;
-                    (x, y, y)
-                };
-                show_search(handle, SearchAnchor::TrayIcon { cx, top, bottom });
+            match event {
+                // 左键：弹出快速搜索面板（保持原有行为）
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    rect,
+                    position,
+                    ..
+                } => {
+                    let handle = tray.app_handle();
+                    // tauri 的 Rect 是"物理/逻辑"枚举；Windows 上托盘给的是物理像素，
+                    // 真出现逻辑值就按主屏缩放换算（缩放只影响这一种情况）。
+                    let sf = handle
+                        .primary_monitor()
+                        .ok()
+                        .flatten()
+                        .map(|m| m.scale_factor())
+                        .unwrap_or(1.0);
+                    let pos = rect.position.to_physical::<i32>(sf);
+                    let size = rect.size.to_physical::<u32>(sf);
+                    // 面板水平中心对到图标中心；上下沿用来决定贴在图标上方还是下方。
+                    // 万一拿不到图标矩形（宽为 0），退回光标位置，至少不会甩到屏幕另一头。
+                    let (cx, top, bottom) = if size.width > 0 {
+                        (
+                            pos.x + size.width as i32 / 2,
+                            pos.y,
+                            pos.y + size.height as i32,
+                        )
+                    } else {
+                        let x = position.x.round() as i32;
+                        let y = position.y.round() as i32;
+                        (x, y, y)
+                    };
+                    // 托盘回调运行在主线程：回调里绝不能做重活（建 WebView 窗口要
+                    // 阻塞主线程约 2s，Windows 会把应用判为"未响应"，ghost 化后
+                    // 吞掉后续所有托盘点击——实测点过一次"设置"后托盘彻底失灵）。
+                    // 这里只打包参数，重活全部丢给后台线程。
+                    let app = handle.clone();
+                    std::thread::spawn(move || {
+                        show_search(&app, SearchAnchor::TrayIcon { cx, top, bottom })
+                    });
+                }
+                // 右键：弹出 Win11 风格菜单窗口
+                TrayIconEvent::Click {
+                    button: MouseButton::Right,
+                    button_state: MouseButtonState::Up,
+                    rect,
+                    position,
+                    ..
+                } => {
+                    let handle = tray.app_handle();
+                    let sf = handle
+                        .primary_monitor()
+                        .ok()
+                        .flatten()
+                        .map(|m| m.scale_factor())
+                        .unwrap_or(1.0);
+                    let pos = rect.position.to_physical::<i32>(sf);
+                    let size = rect.size.to_physical::<u32>(sf);
+                    let (cx, top, bottom) = if size.width > 0 {
+                        (
+                            pos.x + size.width as i32 / 2,
+                            pos.y,
+                            pos.y + size.height as i32,
+                        )
+                    } else {
+                        let x = position.x.round() as i32;
+                        let y = position.y.round() as i32;
+                        (x, y, y)
+                    };
+                    // 同左键：回调只打包参数，建窗口的重活在后台线程做
+                    let app = handle.clone();
+                    std::thread::spawn(move || show_tray_menu(&app, cx, top, bottom));
+                }
+                _ => {}
             }
         })
         .build(app)?;
     Ok(())
+}
+
+/// 托盘菜单窗口的尺寸（逻辑像素）。项数固定：6 项 + 2 条分隔线。
+/// 与 TrayMenuWindow.tsx 的布局保持一致，改了菜单项记得同步这里。
+const TRAY_MENU_W: f64 = 252.0;
+const TRAY_MENU_H: f64 = 264.0;
+
+/// 主线程最后一次"空闲"的时刻（后台线程写入，主线程读到即证明它转得动）。
+static MAIN_THREAD_ALIVE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// 毫秒时间戳 → 自增计数（只需比较大小，用 AtomicU64 存 unix 毫秒即可）。
+fn now_ms_u64() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 托盘图标自愈：Windows 会把"主线程长时间不泵消息"的应用判为未响应，
+/// 并**停止向它的托盘图标投递点击**（ghost 化）。主线程恢复后图标已经是死的，
+/// 托盘右键永远不再触发 `on_tray_icon_event` —— 表现为"点一次新建分区/设置，
+/// 菜单就再也弹不出来"。日志里主线程心跳照常继续，正是这个特征。
+///
+/// 判定用"心跳戳距今多久"，而不是"戳变没变"：心跳探针本身就是 10s 一跳，
+/// 看变化会在每个周期里误判成卡死。这里要求**超过 25s 没更新**（两个多周期）
+/// 才认定主线程真的卡住了。
+fn spawn_tray_icon_watchdog(app: AppHandle) {
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+    std::thread::spawn(move || {
+        // 宽限期：启动阶段本来就有几次秒级的主线程占用（分区窗口逐个创建），
+        // 那时 Windows 还没判定未响应，不该动托盘。
+        let start = Instant::now();
+        // 上次"派活出去"的时间：修复任务在独立线程里跑（可能要等 60s），
+        // 这里只记派活时刻做节流，避免它在等的这段时间里被反复派出去。
+        let mut last_dispatch: Option<Instant> = None;
+        loop {
+            std::thread::sleep(Duration::from_millis(1000));
+            if start.elapsed() < Duration::from_secs(20) {
+                continue;
+            }
+            let last = MAIN_THREAD_ALIVE.load(Ordering::Relaxed);
+            if last == 0 {
+                continue; // 还没收到过心跳，探针本身没起来
+            }
+            let age_ms = now_ms_u64().saturating_sub(last);
+            if age_ms <= 25_000 {
+                continue; // 主线程正常推进
+            }
+            // 节流：一次卡死只派一次活；派活后 90s 内不再重复
+            if let Some(t) = last_dispatch {
+                if t.elapsed() < Duration::from_secs(90) {
+                    continue;
+                }
+            }
+            last_dispatch = Some(Instant::now());
+            log_msg(&format!(
+                "tray-icon: 主线程已 {age_ms}ms 无心跳，等待恢复后重建托盘图标"
+            ));
+            let stuck_at = last;
+            let app = app.clone();
+            std::thread::spawn(move || {
+                // 等主线程自己缓过来（最多 60s）
+                let deadline = Instant::now() + Duration::from_secs(60);
+                while Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(200));
+                    if MAIN_THREAD_ALIVE.load(Ordering::Relaxed) != stuck_at {
+                        break;
+                    }
+                }
+                // 把重建投递回主线程：托盘图标的增删必须在主线程做
+                let a = app.clone();
+                let _ = app.run_on_main_thread(move || match build_tray(&a) {
+                    Ok(()) => log_msg("tray-icon: 主线程曾阻塞，已重建托盘图标解除 ghost"),
+                    Err(e) => log_msg(&format!("tray-icon: 重建托盘图标失败：{e}")),
+                });
+            });
+        }
+    });
+}
+
+/// 主线程心跳探针：后台线程每 10s 往主线程派发一次日志。
+/// 主线程活着 → 日志每 10s 一条 "main-thread 心跳"；
+/// 主线程死锁/被重活阻塞 → 心跳断流（delayed dispatch 也排队）。
+/// 用来区分"进程活着但主线程死了"（托盘无响应但日志还有其它线程活动）。
+fn spawn_main_thread_probe(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut n = 0u64;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            let app = app.clone();
+            let seq = n;
+            let _ = app.run_on_main_thread(move || {
+                // 顺带刷新"主线程存活"戳：托盘图标自愈靠它判断主线程是否脱困
+                MAIN_THREAD_ALIVE.store(now_ms_u64(), std::sync::atomic::Ordering::Relaxed);
+                log_msg(&format!("main-thread 心跳 #{seq}（主线程存活）"));
+            });
+            n += 1;
+        }
+    });
+}
+
+/// 托盘菜单窗口的 label —— **常驻唯一窗口**。
+///
+/// 生命周期方案（经过三轮实测教训得出的最终形态）：
+/// - 启动时预创建，WebView 常驻加载完成（弹出零等待、内容即时）
+/// - 弹出 = 挪到托盘旁 + show；收起 = **挪到屏幕外**，永不 hide/destroy
+/// - 为什么不用 hide/show 复用：WebView2 隐藏后渲染/脚本会挂起，show 后
+///   存在不恢复的竞态（实测菜单弹出几次后前端心跳消失）
+/// - 为什么不每次重建：动态建第二个 WebView 会和主窗口的 WebView 初始化
+///   竞争（实测新窗口永远不加载内容、主线程心跳断流）
+/// - 屏幕外方案下 WebView 始终可见渲染，两类竞态都不存在
+const TRAY_MENU_LABEL: &str = "tray-menu";
+/// 屏幕外隐藏位（物理像素）。-32000 是 Windows 传统"屏幕外"坐标，
+/// 任何多屏组合都够不到。
+fn tray_menu_offscreen() -> tauri::PhysicalPosition<i32> {
+    tauri::PhysicalPosition::new(-32000, -32000)
+}
+
+/// 菜单弹出代际：每次弹出 +1，失焦轮询发现代际变了就自己退役
+/// （保证任意时刻只有一个活跃轮询，旧的不会把新弹出的菜单收掉）。
+static TRAY_MENU_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// 菜单当前是否处于"展开"状态（屏幕外 = false）。收起路径统一走这里。
+static TRAY_MENU_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 上一次 show_tray_menu 的时刻。Windows 托盘对一次右键可能连发两次 Click
+/// （日志实测间隔 13ms），不去重的话会双 spawn 轮询、双 emit。
+static LAST_TRAY_MENU_SHOW: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+/// 托盘菜单 WebView 最近一次心跳（前端 ping / shown 回执都会刷新）。
+/// WebView 脚本会被静默冻死（窗口保留最后一帧渲染，看起来正常但点击、
+/// 事件全无响应）——弹出时检查心跳龄，断流就销毁重建实现自愈。
+static LAST_TRAY_MENU_HEARTBEAT: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+/// 记录托盘菜单 WebView 心跳（tray_menu_ping 命令与 shown 事件回执共用）。
+pub fn touch_tray_menu_heartbeat() {
+    *LAST_TRAY_MENU_HEARTBEAT.lock().unwrap() = Some(std::time::Instant::now());
+}
+
+/// 在托盘附近弹出 Win11 风格的右键菜单窗口。
+///
+/// `cx`/`top`/`bottom` 是托盘图标的物理坐标（水平中心 / 上沿 / 下沿）：
+/// 默认贴在图标下方；下方放不下就翻到上方。
+fn show_tray_menu(app: &AppHandle, cx: i32, top: i32, bottom: i32) {
+    // 一次右键连发两次 Click（间隔 ~13ms，日志实证）：300ms 内的重复调用直接吞掉
+    {
+        let mut last = LAST_TRAY_MENU_SHOW.lock().unwrap();
+        if let Some(t) = *last {
+            if t.elapsed() < std::time::Duration::from_millis(300) {
+                log_msg("tray-menu：300ms 内重复触发，已去重");
+                return;
+            }
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    let sf = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| m.scale_factor())
+        .unwrap_or(1.0);
+    let w = (TRAY_MENU_W * sf).round() as i32;
+    let h = (TRAY_MENU_H * sf).round() as i32;
+    // 水平：菜单中心对齐图标中心，两端夹回屏幕内（托盘图标可能贴着屏幕边）
+    let (screen_w, screen_h) = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| (m.size().width as i32, m.size().height as i32))
+        .unwrap_or((1920, 1080));
+    let mut x = cx - w / 2;
+    x = x.clamp(8, (screen_w - w - 8).max(8));
+    // 垂直：默认在图标下方留 6px 缝；放不下（任务栏在底部时菜单会被截）就翻上去。
+    // 注意跟**屏幕高度**比 —— 之前误写成跟宽度比，高分辨率屏上永远"放得下"，
+    // 菜单就被定位到屏幕底边之外（日志里 y=1446 > 屏高 1440，整窗看不见）。
+    let mut y = bottom + 6;
+    if y + h > screen_h {
+        y = (top - 6 - h).max(8);
+    }
+    // 窗口操作的 Result 统一检查：这些调用失败不会 panic，但会直接导致
+    // "菜单没弹出来"—— 必须留痕，否则链路在这一环断掉时无迹可寻。
+    let check = |what: &str, r: tauri::Result<()>| {
+        if let Err(e) = r {
+            log_msg(&format!("tray-menu {what} 失败：{e}"));
+        }
+    };
+    // 常驻窗口复用；弹出前先做"WebView 活性"体检：
+    // 心跳断流（>25s 无 ping/无 shown 回执）说明脚本已冻死 —— 窗口渲染保留
+    // 最后一帧、看起来正常但点击/事件全死。销毁重建是唯一恢复手段。
+    let win = match app.get_webview_window(TRAY_MENU_LABEL) {
+        Some(w) => {
+            let stale = match LAST_TRAY_MENU_HEARTBEAT.lock().unwrap().as_ref() {
+                Some(t) => t.elapsed() > std::time::Duration::from_secs(25),
+                // 从未收到过心跳：预创建的页面加载本身就需要一点时间，
+                // 给 60s 宽限；连这都没有说明 WebView 从未活过
+                None => false,
+            };
+            if stale {
+                log_msg("tray-menu WebView 心跳断流，销毁重建自愈");
+                let _ = w.destroy();
+                precreate_tray_menu(app);
+                // 重建后的页面在 ~150ms 内加载完（历史实测），照常继续弹出
+                match app.get_webview_window(TRAY_MENU_LABEL) {
+                    Some(w2) => w2,
+                    None => {
+                        log_msg("tray-menu 自愈重建失败，本次不弹菜单");
+                        return;
+                    }
+                }
+            } else {
+                w
+            }
+        }
+        None => {
+            log_msg("tray-menu 常驻窗口不存在，尝试补建");
+            precreate_tray_menu(app);
+            match app.get_webview_window(TRAY_MENU_LABEL) {
+                Some(w) => w,
+                None => {
+                    log_msg("tray-menu 补建失败，本次不弹菜单");
+                    return;
+                }
+            }
+        }
+    };
+    check("set_position", win.set_position(tauri::PhysicalPosition::new(x, y)));
+    check("show", win.show());
+    check("set_focus", win.set_focus());
+    TRAY_MENU_OPEN.store(true, std::sync::atomic::Ordering::Relaxed);
+    let gen = TRAY_MENU_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    log_msg(&format!("tray-menu 已弹出（gen={gen}），定位 ({x},{y})"));
+    // 通知前端刷新（开机自启勾选态可能已变；这条事件也是前端活着的探针）
+    if let Err(e) = app.emit_to(TRAY_MENU_LABEL, "tray-menu-shown", gen) {
+        log_msg(&format!("tray-menu emit shown 失败：{e}"));
+    }
+    // 失焦收起 watcher：只喂"窗口矩形缓存 + 托盘点 + 代际"，轮询内零窗口 API
+    spawn_tray_menu_blur_watcher(win, (x, y, w, h), (cx, top, bottom), gen);
+}
+
+/// 创建（或确认存在）托盘菜单常驻窗口。
+/// 启动时调用：建好放屏幕外，WebView 立即开始加载页面，右键弹出零等待。
+/// 弹出时若窗口意外不存在也会调用它兜底，所以入口处先查重。
+fn precreate_tray_menu(app: &AppHandle) {
+    if app.get_webview_window(TRAY_MENU_LABEL).is_some() {
+        return;
+    }
+    let builder = tauri::WebviewWindowBuilder::new(
+        app,
+        TRAY_MENU_LABEL,
+        tauri::WebviewUrl::App("index.html?traymenu=1".into()),
+    )
+    .title("Qidomin")
+    .inner_size(TRAY_MENU_W, TRAY_MENU_H)
+    .position(-32000.0, -32000.0)
+    .decorations(false)
+    .transparent(true)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .skip_taskbar(true)
+    .always_on_top(true)
+    .shadow(false)
+    .visible(false);
+    match builder.build() {
+        Ok(win) => {
+            let _ = win.set_position(tray_menu_offscreen());
+            log_msg("tray-menu 窗口已预创建（屏幕外待命）");
+        }
+        Err(e) => log_msg(&format!("tray-menu 预创建失败：{e}")),
+    }
+}
+
+/// 收起托盘菜单（挪到屏幕外，窗口与 WebView 常驻待命）。
+/// 三个入口共用：菜单项点击后前端调用、Esc、失焦轮询。
+pub fn tray_menu_dismiss(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window(TRAY_MENU_LABEL) {
+        let _ = win.set_position(tray_menu_offscreen());
+    }
+    TRAY_MENU_OPEN.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 托盘菜单的失焦自动收起（后台轮询）。
+///
+/// 只信鼠标、不信焦点：托盘右键后 Windows 的前台焦点在任务栏和菜单之间
+/// 拉扯，is_focused 抖动不可信（实测会把刚弹出的菜单 1 秒内误收）。
+/// 鼠标规则（菜单窗口矩形 + 托盘图标附近）：
+/// - 鼠标悬停在菜单上 → 永不收
+/// - 鼠标停在托盘附近（刚右键还没挪）→ 不收
+/// - 从未进入过菜单、鼠标又不在托盘附近超过 3s → 收（弹出后没碰它）
+/// - 曾进入菜单、离开超过 0.6s 且不在托盘附近 → 收（看过菜单后点去别处）
+/// 代际号保证每次弹出只有一个活跃轮询。
+fn spawn_tray_menu_blur_watcher(
+    win: tauri::WebviewWindow,
+    rect: (i32, i32, i32, i32),
+    tray: (i32, i32, i32),
+    gen: u64,
+) {
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+    // 用普通线程而不是 tokio：项目未直接依赖 tokio，且轮询频率低、
+    // 线程存活期短，开销可以忽略。
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        let mut ever_hover = false;
+        let mut left_hover_at: Option<Instant> = None;
+        loop {
+            std::thread::sleep(Duration::from_millis(200));
+            // 已收起（菜单项点击 / Esc / 失焦）或已有新代际弹出 → 本轮询退役
+            if !TRAY_MENU_OPEN.load(Ordering::Relaxed)
+                || TRAY_MENU_GEN.load(Ordering::Relaxed) != gen
+            {
+                break;
+            }
+            // 鼠标位置分类：菜单上 / 托盘附近 / 其它。
+            // 窗口矩形用 show_tray_menu 缓存值，这里只调 GetCursorPos，
+            // 不做任何跨线程窗口 API（避免与主线程互相拖累）。
+            let Some((mx, my)) = cursor_point() else { break };
+            let on_menu = mx >= rect.0
+                && mx < rect.0 + rect.2
+                && my >= rect.1
+                && my < rect.1 + rect.3;
+            let near_tray = (mx - tray.0).abs() < 90 && (my - (tray.1 + tray.2) / 2).abs() < 70;
+            if on_menu {
+                ever_hover = true;
+                left_hover_at = None;
+            } else if ever_hover && left_hover_at.is_none() {
+                left_hover_at = Some(Instant::now());
+            }
+            // 收起判定（只看鼠标意图，焦点完全不参与）：
+            let should_close = if on_menu || near_tray {
+                false
+            } else if ever_hover {
+                // 看过菜单：离开 0.6s 才收（给"点菜单项"的鼠标轨迹留裕量）
+                left_hover_at.is_some_and(|t| t.elapsed() > Duration::from_millis(600))
+            } else {
+                // 从没碰过菜单：3s 后收（弹出后放着不管）
+                started.elapsed() > Duration::from_secs(3)
+            };
+            if should_close {
+                // 收起 = 挪屏幕外（窗口常驻，不 hide——hide 会让 WebView 挂起）
+                tray_menu_dismiss(win.app_handle());
+                log_msg("tray-menu 失焦自动收起");
+                break;
+            }
+        }
+    });
+}
+
+/// 当前鼠标位置（物理像素）。拿不到（极少见）返回 None。
+#[cfg(windows)]
+fn cursor_point() -> Option<(i32, i32)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut pt = POINT::default();
+    let ok = unsafe { GetCursorPos(&mut pt) };
+    ok.ok().map(|_| (pt.x, pt.y))
+}
+
+#[cfg(not(windows))]
+fn cursor_point() -> Option<(i32, i32)> {
+    None
+}
+
+/// 退出前的收尾（托盘菜单"退出"调用）：归还文件 → 落盘 → 退出。
+pub fn quit_app(app: &AppHandle) {
+    // 先销"正常退出"标记，再做落盘/归还（这一步可能被打断或失败，
+    // 但只要标记没了，下次启动就会按搬运记录把文件收回分区）
+    session::mark_clean_exit();
+    // 退出前把分区窗口的最终几何强制落盘（节流可能丢最后一帧），
+    // 保证重启后的布局和退出那一刻一致
+    boxwin::persist_all_geometry(app);
+    // 退出前把分区里的文件归还桌面：程序没开的时候桌面是"正常"的，
+    // 下次启动再按移动记录收回来（engine::reorganize_from_history）
+    let db = app.state::<Db>();
+    let n = match engine::return_all_to_desktop(&db) {
+        Ok(n) => {
+            log_msg(&format!("退出归还文件：{n} 个"));
+            n
+        }
+        Err(e) => {
+            log_msg(&format!("return_all_to_desktop failed: {e}"));
+            0
+        }
+    };
+    if n > 0 {
+        shellicon::refresh_desktop_icons();
+    }
+    // 标记在进这条分支时就已经销掉了（见上）：守卫进程看到标记没了就不会再动文件
+    app.exit(0);
 }
 
 /// 单实例检测：已有健康实例则返回 true（本实例应退出）；已有实例卡死/无响应则返回 false（本实例接管继续启动）
@@ -833,7 +1232,20 @@ pub fn run() {
             std::thread::spawn(move || {
                 let _ = engine::repair_auto_start(&db_for_auto_start);
             });
-            build_tray(app)?;
+            build_tray(app.handle())?;
+            // 托盘菜单前端心跳（事件通道）：与 invoke 通道互为对照。
+            // emit 通而 invoke 不通 = capability/命令注册问题；两条都不通 = WebView 没跑。
+            // 在这里注册而不是放进 build_tray —— watchdog 修复托盘时会重复调用
+            // build_tray，监听器注册多份会让同一条心跳日志打好几遍。
+            app.listen("tray-menu-alive", |ev| {
+                log_msg(&format!("tray-menu 前端心跳(事件)：{}", ev.payload()));
+            });
+            spawn_main_thread_probe(app.handle().clone());
+            // 托盘图标自愈：主线程被重活堵到被 Windows 判为未响应时，
+            // 托盘图标会被 ghost 化（不再投递点击）且不会自行恢复，这里负责救回来。
+            spawn_tray_icon_watchdog(app.handle().clone());
+            // 托盘菜单窗口常驻预创建：启动即加载页面，右键弹出零等待
+            precreate_tray_menu(app.handle());
             // 搜索索引：后台线程先建一次索引，之后定时增量重建常用目录
             search::spawn_indexer(app.handle().clone());
             // 实时增量：基于 Windows 变更通知（USN Journal）监听已索引根的增删改名
@@ -947,6 +1359,10 @@ pub fn run() {
             commands::rename_box,
             commands::merge_boxes,
             commands::organize_desktop,
+            commands::organize_desktop_plan,
+            commands::organize_desktop_commit,
+            commands::undo_last_organize,
+            commands::get_last_organize_batch,
             commands::organize_box,
             commands::get_absorb_cfg,
             commands::set_absorb_cfg,
@@ -960,6 +1376,11 @@ pub fn run() {
             commands::get_box_window_cfg,
             commands::save_box_window_cfg,
             commands::set_box_visible,
+            commands::set_box_collapsed,
+            commands::tray_menu_action,
+            commands::tray_menu_ping,
+            commands::tray_menu_dismiss,
+            commands::set_auto_start_enabled,
             commands::get_box_snap_targets,
             commands::start_box_drag,
             commands::set_box_link,

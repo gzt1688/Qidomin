@@ -1,6 +1,9 @@
 import React, { lazy, Suspense } from "react";
 import ReactDOM from "react-dom/client";
 import "./styles.css";
+// 托盘菜单静态引入（不走 lazy）：菜单要求"右键即现"，多一次 chunk 往返都嫌慢；
+// 体积只有几 KB，打进主 chunk 的代价可忽略
+import TrayMenuWindow from "./components/TrayMenuWindow";
 
 // 按窗口类型动态加载：分区窗口只需要 BoxWindow，设置窗口只需要 App。
 // 拆成独立 chunk 后，每个窗口首次加载/解析的 JS 更少，窗口出现更快。
@@ -15,6 +18,7 @@ const isHuangdi = params.get("huangdi");
 const isShanghan = params.get("shanghan");
 const isSearch = params.has("search");
 const widgetMenu = params.get("widgetmenu");
+const trayMenu = params.get("traymenu");
 
 const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
 
@@ -37,6 +41,13 @@ if (boxMenuId) {
           kind={widgetMenu as "notes" | "stock" | "huangli" | "poetry" | "huangdi" | "shanghan"}
         />
       </Suspense>
+    </React.StrictMode>
+  );
+} else if (trayMenu) {
+  // 托盘右键菜单：自绘 Win11 风格，独立置顶小窗（原生 HMENU 样式老旧已弃用）
+  root.render(
+    <React.StrictMode>
+      <TrayMenuWindow />
     </React.StrictMode>
   );
 } else if (boxId) {

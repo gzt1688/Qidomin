@@ -27,6 +27,23 @@ pub struct OrganizeResult {
     pub moved: i64,
     pub failed: i64,
     pub details: Vec<OrganizeDetail>,
+    /// 每条失败的可读原因（文件被占用 / 权限不足 / 目标同名…）。
+    /// 以前只给个数（`failed: 3`），用户不知道哪个文件为什么没动 —— 静默跳过
+    /// 换来的就是"我整理了，但东西还在桌面"的困惑。前端取第一条弹提示。
+    #[serde(default)]
+    pub errors: Vec<String>,
+}
+
+impl OrganizeResult {
+    pub fn new() -> Self {
+        Self { moved: 0, failed: 0, details: Vec::new(), errors: Vec::new() }
+    }
+}
+
+impl Default for OrganizeResult {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -206,6 +223,26 @@ fn match_date(modified_at: &str, pattern: &str) -> bool {
 }
 
 pub fn match_file(file: &DesktopFile, rules: &[RuleRow], skip_rule_id: Option<i64>) -> Option<i64> {
+    match_file_detailed(file, rules, skip_rule_id).map(|(id, _)| id)
+}
+
+/// 规则命中的**人话**依据（预览列表里给用户看："为什么这个文件要去 A 分区"）。
+fn rule_match_note(rule: &RuleRow) -> String {
+    match rule.match_type.as_str() {
+        "extension" => format!("扩展名 {}", rule.pattern),
+        "keyword" => format!("关键词 {}", rule.pattern),
+        "size" => format!("大小 {}", rule.pattern),
+        "date" => format!("时间 {}", rule.pattern),
+        _ => rule.match_type.clone(),
+    }
+}
+
+/// 同 [`match_file`]，但把命中的**规则依据**一起带回来（预览用）。
+pub fn match_file_detailed(
+    file: &DesktopFile,
+    rules: &[RuleRow],
+    skip_rule_id: Option<i64>,
+) -> Option<(i64, String)> {
     for rule in rules {
         if Some(rule.id) == skip_rule_id {
             continue;
@@ -230,7 +267,7 @@ pub fn match_file(file: &DesktopFile, rules: &[RuleRow], skip_rule_id: Option<i6
             _ => false,
         };
         if hit {
-            return Some(rule.box_id);
+            return Some((rule.box_id, rule_match_note(rule)));
         }
     }
     None
@@ -1091,7 +1128,7 @@ pub fn organize_desktop(db: &Db) -> Result<OrganizeResult, String> {
     let box_names: Vec<String> = boxes.iter().map(|(_, n, _)| n.clone()).collect();
     let rules = load_enabled_rules(db)?;
     let desktop_files = scan_desktop(&box_names, include_shortcuts)?;
-    let mut result = OrganizeResult { moved: 0, failed: 0, details: Vec::new() };
+    let mut result = OrganizeResult::new();
     for file in &desktop_files {
         let target_box = if include_shortcuts && file.ext == "lnk" {
             boxes.iter().find(|(_, _, t)| t == "software").map(|(id, _, _)| *id)
@@ -1115,10 +1152,239 @@ pub fn organize_desktop(db: &Db) -> Result<OrganizeResult, String> {
                     result.details.push(OrganizeDetail { box_name: box_name.clone(), count: 1 });
                 }
             }
-            Err(_) => result.failed += 1,
+            // 失败不再吞掉：带上文件名和原因（占用/权限/不存在），前端能弹出来
+            Err(e) => {
+                result.failed += 1;
+                result.errors.push(format!("「{}」{}", file.name, e));
+            }
         }
     }
     Ok(result)
+}
+
+// ---------- 自动整理：预览 → 确认执行 → 可撤销 ----------
+//
+// 以前"一键整理"是「扫一遍 → 直接搬」，用户对"哪些文件会被动"零感知：
+// 刚下载到一半的文件可能被搬走、桌面上正在编辑的文件可能被吸进分区。
+// 现在拆成三步：plan（只算不动）→ 前端弹预览、用户可勾选 → commit（逐项执行、
+// 逐条报错）→ undo（按批次记录原路搬回）。
+
+/// 预览里的一条：这个文件将被搬去哪个分区、依据是什么。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizePlanItem {
+    pub path: String,
+    pub name: String,
+    pub ext: String,
+    pub size: u64,
+    pub target_box_id: i64,
+    pub target_box_name: String,
+    /// 匹配依据，可直接展示：`扩展名 png` / `关键词 报告` / `软件快捷方式` / `未匹配规则，进默认分区`
+    pub matched_by: String,
+}
+
+/// 一次整理的预览结果。**只做匹配，不动任何文件。**
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizePlan {
+    pub items: Vec<OrganizePlanItem>,
+    /// 正在被占用 / 刚写完的文件：这一轮不动（避免搬走写了一半的内容），单独列出
+    pub busy: Vec<String>,
+}
+
+/// 前端确认后回传的执行清单（用户可能取消了部分勾选）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizeCommitItem {
+    pub path: String,
+    pub target_box_id: i64,
+}
+
+/// 执行结果。`batch_id` 指向本次批次（organize_log），供"撤销上次整理"使用；
+/// 一项都没搬成功时为 None。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizeCommitResult {
+    pub moved: i64,
+    pub failed: i64,
+    pub errors: Vec<String>,
+    pub batch_id: Option<String>,
+}
+
+pub fn plan_organize_desktop(db: &Db) -> Result<OrganizePlan, String> {
+    let include_shortcuts = db
+        .get_setting("organizeShortcuts")?
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    let boxes = load_boxes_with_id(db)?;
+    let box_names: Vec<String> = boxes.iter().map(|(_, n, _)| n.clone()).collect();
+    let rules = load_enabled_rules(db)?;
+    let desktop_files = scan_desktop(&box_names, include_shortcuts)?;
+    let fallback = fallback_box_id(&boxes).and_then(|id| {
+        boxes
+            .iter()
+            .find(|(bid, _, t)| *bid == id && t != "folder")
+            .map(|(id, n, _)| (*id, n.clone()))
+    });
+    let mut plan = OrganizePlan { items: Vec::new(), busy: Vec::new() };
+    for file in &desktop_files {
+        let src = Path::new(&file.path);
+        // 预览阶段就把"正在写入"的文件剔出来：它们被单独展示成"跳过"，
+        // 而不是混在要搬的列表里让用户误以为会被搬走
+        if is_file_busy(src) {
+            plan.busy.push(file.name.clone());
+            continue;
+        }
+        let target: Option<(i64, String, String)> = if include_shortcuts && file.ext == "lnk" {
+            boxes
+                .iter()
+                .find(|(_, _, t)| t == "software")
+                .map(|(id, n, _)| (*id, n.clone(), "软件快捷方式".to_string()))
+        } else {
+            match match_file_detailed(file, &rules, None) {
+                Some((id, note)) => {
+                    // 规则指向快捷文件夹分区时不作数（它只做链接展示），退回默认分区
+                    let is_folder = boxes
+                        .iter()
+                        .any(|(bid, _, t)| *bid == id && t == "folder");
+                    if is_folder {
+                        fallback.clone().map(|(id, n)| (id, n, note))
+                    } else {
+                        boxes
+                            .iter()
+                            .find(|(bid, _, _)| *bid == id)
+                            .map(|(_, n, _)| (id, n.clone(), note))
+                    }
+                }
+                None => fallback
+                    .clone()
+                    .map(|(id, n)| (id, n, "未匹配规则，进默认分区".to_string())),
+            }
+        };
+        let Some((box_id, box_name, note)) = target else { continue };
+        plan.items.push(OrganizePlanItem {
+            path: file.path.clone(),
+            name: file.name.clone(),
+            ext: file.ext.clone(),
+            size: file.size,
+            target_box_id: box_id,
+            target_box_name: box_name,
+            matched_by: note,
+        });
+    }
+    Ok(plan)
+}
+
+/// 执行整理：把前端确认过的清单逐项搬进目标分区。
+///
+/// 与预览之间可能隔了几分钟，源文件的状态可能已变 —— 所以每一项都**重新检查**：
+/// 目标分区还在不在、源文件还在不在、是否被占用。失败的给**逐条可读原因**，
+/// 绝不静默跳过。搬成功的写进一个批次（organize_log），撤销时按它原路搬回。
+pub fn commit_organize_desktop(
+    db: &Db,
+    items: &[OrganizeCommitItem],
+) -> Result<OrganizeCommitResult, String> {
+    let boxes = load_boxes_with_id(db)?;
+    let mut r = OrganizeCommitResult { moved: 0, failed: 0, errors: Vec::new(), batch_id: None };
+    let mut log: Vec<(String, String)> = Vec::new();
+    for item in items {
+        let src = Path::new(&item.path);
+        let name = src
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| item.path.clone());
+        let Some((_, box_name, box_type)) =
+            boxes.iter().find(|(id, _, _)| *id == item.target_box_id)
+        else {
+            r.failed += 1;
+            r.errors.push(format!("「{name}」的目标分区已被删除"));
+            continue;
+        };
+        if box_type == "folder" {
+            r.failed += 1;
+            r.errors.push(format!("「{name}」的目标是快捷文件夹，不能作为整理落点"));
+            continue;
+        }
+        if !src.exists() {
+            r.failed += 1;
+            r.errors.push(format!("「{name}」已不存在（可能被移动或删除）"));
+            continue;
+        }
+        if is_file_busy(src) {
+            r.failed += 1;
+            r.errors.push(format!("「{name}」正在被其他程序使用，稍后再试"));
+            continue;
+        }
+        match ensure_box_dir(box_name).and_then(|dir| move_file(db, src, &dir)) {
+            Ok(to) => {
+                r.moved += 1;
+                log.push((item.path.clone(), to.to_string_lossy().to_string()));
+            }
+            Err(e) => {
+                r.failed += 1;
+                r.errors.push(format!("「{name}」：{e}"));
+            }
+        }
+    }
+    if !log.is_empty() {
+        let batch_id = format!("org-{}", chrono::Local::now().format("%Y%m%d%H%M%S%3f"));
+        db.organize_log_insert_batch(&batch_id, &log)?;
+        r.batch_id = Some(batch_id);
+    }
+    Ok(r)
+}
+
+/// 撤销最近一次整理：把这批文件**原路搬回**。
+///
+/// - 原位置没人占 → 回到原路径；
+/// - 原位置被占了 → 改名放在原目录（绝不覆盖用户这几分钟新放的文件）；
+/// - 源文件已被用户挪走 → 跳过（不用管）。
+/// 搬回的同时清掉对应的移动历史，免得"退出归还"再按它搬一次。
+///
+/// 返回 (搬回数, 批次总数)。
+pub fn undo_last_organize(db: &Db) -> Result<(u32, u32), String> {
+    let Some((batch_id, _, _)) = db.latest_organize_batch()? else {
+        return Err("没有可撤销的整理记录".to_string());
+    };
+    let items = db.organize_batch_items(&batch_id)?;
+    let total = items.len() as u32;
+    let mut back = 0u32;
+    for (from, to) in &items {
+        let src = Path::new(to);
+        if !src.exists() {
+            continue;
+        }
+        let fname = src
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let dst_dir = Path::new(from)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .ok_or_else(|| "无法获取桌面路径".to_string())?;
+        let target = unique_target_kind(&dst_dir, &fname, src.is_dir());
+        if transfer_to_exact(src, &target).is_ok() {
+            back += 1;
+            // 清掉这条搬运记录：文件已经回原位，历史里留着它只会误导后续的归还链路
+            let _ = db.delete_move_by_to(to);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(p) = src.parent() {
+                refresh_shell_views(p);
+            }
+            if let Some(p) = target.parent() {
+                refresh_shell_views(p);
+            }
+        }
+    }
+    db.organize_log_delete_batch(&batch_id)?;
+    Ok((back, total))
+}
+
+/// 最近一次整理批次的信息：(batch_id, 文件数, 时间)。给"撤销上次整理"按钮显示用。
+pub fn last_organize_info(db: &Db) -> Result<Option<(String, i64, String)>, String> {
+    db.latest_organize_batch()
 }
 
 pub fn load_boxes_with_id(db: &Db) -> Result<Vec<(i64, String, String)>, String> {
@@ -1148,11 +1414,11 @@ pub fn organize_box(db: &Db, box_id: i64) -> Result<OrganizeResult, String> {
         return Err("分区不存在".to_string());
     };
     if box_type == "folder" {
-        return Ok(OrganizeResult { moved: 0, failed: 0, details: Vec::new() });
+        return Ok(OrganizeResult::new());
     }
     let box_dir = ensure_box_dir(box_name)?;
     let rules = load_enabled_rules(db)?;
-    let mut result = OrganizeResult { moved: 0, failed: 0, details: Vec::new() };
+    let mut result = OrganizeResult::new();
     let entries = fs::read_dir(&box_dir).map_err(|e| format!("读取分区失败: {e}"))?;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -1177,7 +1443,7 @@ pub fn organize_box(db: &Db, box_id: i64) -> Result<OrganizeResult, String> {
             })
             .unwrap_or_default();
         let file = DesktopFile {
-            name,
+            name: name.clone(),
             path: path.to_string_lossy().to_string(),
             is_dir: false,
             ext,
@@ -1204,7 +1470,10 @@ pub fn organize_box(db: &Db, box_id: i64) -> Result<OrganizeResult, String> {
                     result.details.push(OrganizeDetail { box_name: target_name.clone(), count: 1 });
                 }
             }
-            Err(_) => result.failed += 1,
+            Err(e) => {
+                result.failed += 1;
+                result.errors.push(format!("「{}」{}", name, e));
+            }
         }
     }
     Ok(result)
@@ -1241,11 +1510,7 @@ fn is_file_busy(path: &Path) -> bool {
 /// 按分区的吸附配置，把桌面上扩展名命中的文件收进该分区。
 /// 只处理桌面根目录下的文件，不会碰其它分区文件夹。
 pub fn absorb_into_box(db: &Db, box_id: i64) -> Result<OrganizeResult, String> {
-    let mut result = OrganizeResult {
-        moved: 0,
-        failed: 0,
-        details: Vec::new(),
-    };
+    let mut result = OrganizeResult::new();
     let boxes = load_boxes_with_id(db)?;
     let Some((_, box_name, box_type)) = boxes.iter().find(|(id, _, _)| *id == box_id) else {
         return Err("分区不存在".to_string());
@@ -1279,7 +1544,10 @@ pub fn absorb_into_box(db: &Db, box_id: i64) -> Result<OrganizeResult, String> {
                         .push(OrganizeDetail { box_name: box_name.clone(), count: 1 });
                 }
             }
-            Err(_) => result.failed += 1,
+            Err(e) => {
+                result.failed += 1;
+                result.errors.push(format!("「{}」{}", file.name, e));
+            }
         }
     }
     Ok(result)

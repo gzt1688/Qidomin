@@ -60,12 +60,20 @@ export default function PanelView({ refreshKey, notify }: PanelViewProps) {
     async (box: BoxInfo) => {
       try {
         const result = await organizeBox(box.id);
-        notify(
-          result.moved > 0
-            ? `已将 ${result.moved} 个不匹配文件移出「${box.name}」`
-            : `「${box.name}」内容全部匹配，无需调整`,
-          "ok"
-        );
+        if (result.moved === 0 && result.failed === 0) {
+          notify(`「${box.name}」内容全部匹配，无需调整`, "ok");
+          return;
+        }
+        if (result.failed > 0) {
+          // 失败不再静默：给出第一条原因（占用/权限/已不存在…），其余看日志
+          const first = result.errors?.[0] ?? "";
+          notify(
+            `${result.moved} 个已移出「${box.name}」，${result.failed} 个失败${first ? `：${first}` : ""}`,
+            "err"
+          );
+        } else {
+          notify(`已将 ${result.moved} 个不匹配文件移出「${box.name}」`, "ok");
+        }
         loadBoxes();
       } catch (e) {
         notify(`整理分区失败：${String(e)}`, "err");

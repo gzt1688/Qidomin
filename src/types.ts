@@ -36,6 +36,40 @@ export interface OrganizeResult {
   moved: number;
   failed: number;
   details: { boxName: string; count: number }[];
+  /** 逐条失败原因（文件被占用 / 已不存在 / 权限…），取第一条弹提示即可 */
+  errors?: string[];
+}
+
+/** 整理预览里的一条：这个文件将被搬去哪个分区、依据是什么 */
+export interface OrganizePlanItem {
+  path: string;
+  name: string;
+  ext: string;
+  size: number;
+  targetBoxId: number;
+  targetBoxName: string;
+  /** 匹配依据（可直接展示）：`扩展名 png` / `关键词 报告` / `软件快捷方式` / `未匹配规则，进默认分区` */
+  matchedBy: string;
+}
+
+/** 一次整理的预览：只匹配不动文件。busy = 正在写入的文件，本轮跳过 */
+export interface OrganizePlan {
+  items: OrganizePlanItem[];
+  busy: string[];
+}
+
+/** 提交给后端执行的一条（用户可取消勾选一部分） */
+export interface OrganizeCommitItem {
+  path: string;
+  targetBoxId: number;
+}
+
+/** 执行结果：batchId 指向本次批次，供"撤销上次整理"使用 */
+export interface OrganizeCommitResult {
+  moved: number;
+  failed: number;
+  errors: string[];
+  batchId: string | null;
 }
 
 /** 一次「把文件拖进某个分区」的结果（分区之间搬运 / 复制） */
@@ -131,6 +165,12 @@ export interface BoxWindowCfg {
   gapX?: number;
   /** 图标网格垂直间距（px），缺省 6 */
   gapY?: number;
+  /** 胶囊模式：true = 当前收起为小胶囊（w/h 是胶囊尺寸，展开几何在 expandedGeom） */
+  collapsed?: boolean;
+  /** 收起为胶囊前的窗口几何 [x, y, w, h]（物理像素），展开时按它恢复 */
+  expandedGeom?: [number, number, number, number] | null;
+  /** 悬停胶囊时是否自动临时展开（缺省 true；false = 只能点击展开） */
+  capsuleHover?: boolean;
 }
 
 /** 诗词面板窗口位置/外观 */
@@ -212,6 +252,11 @@ export type BoxMenuAction =
   | { kind: "sort"; value: string }
   | { kind: "gap"; gapX: number; gapY: number }
   | { kind: "locked"; value: boolean }
+  /** 胶囊模式：收起 / 展开分区（几何保存恢复在后端 set_box_collapsed） */
+  | { kind: "collapse" }
+  | { kind: "expand" }
+  /** 胶囊模式：悬停是否自动临时展开 */
+  | { kind: "capsuleHover"; value: boolean }
   | { kind: "absorb" }
   | { kind: "organize" }
   | { kind: "delete" };

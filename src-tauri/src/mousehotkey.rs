@@ -369,8 +369,12 @@ fn run_app_action(action: &str) {
             });
         }
         "organize" => {
-            let db = app.state::<Db>();
-            let _ = crate::engine::organize_desktop(&db);
+            // 与托盘"一键整理"一致：带出主窗口 + 发预览请求，确认后才真正搬
+            let a2 = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                crate::show_main(&a2);
+                let _ = tauri::Emitter::emit(&a2, "organize-request", ());
+            });
         }
         "toggleNotes" => {
             let db = app.state::<Db>();

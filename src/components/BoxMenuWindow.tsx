@@ -173,7 +173,53 @@ export default function BoxMenuWindow({ boxId }: { boxId: number }) {
         >
           锁定
         </button>
+        {cfg?.collapsed ? (
+          <button
+            title="展开：恢复收起前的大小和位置"
+            onClick={() => {
+              setCfg((c) => (c ? { ...c, collapsed: false } : c));
+              send({ kind: "expand" }, false);
+            }}
+          >
+            展开
+          </button>
+        ) : (
+          <button
+            title="收起为胶囊：点击或悬停可再展开"
+            onClick={() => {
+              setCfg((c) => (c ? { ...c, collapsed: true } : c));
+              send({ kind: "collapse" }, false);
+            }}
+          >
+            收起
+          </button>
+        )}
       </div>
+      {/* 胶囊模式下才需要"悬停展开"这个开关：普通分区悬停没有展开行为 */}
+      {cfg?.collapsed ? (
+        <div className="menu-row">
+          <button
+            className={cfg?.capsuleHover === false ? "" : "active"}
+            title="关：鼠标悬停胶囊不自动展开，只能点击展开"
+            onClick={() => {
+              setCfg((c) => (c ? { ...c, capsuleHover: false } : c));
+              send({ kind: "capsuleHover", value: false }, false);
+            }}
+          >
+            悬停不展开
+          </button>
+          <button
+            className={cfg?.capsuleHover === false ? "active" : ""}
+            title="开（默认）：鼠标悬停胶囊 0.5 秒自动临时展开，移开后收起"
+            onClick={() => {
+              setCfg((c) => (c ? { ...c, capsuleHover: true } : c));
+              send({ kind: "capsuleHover", value: true }, false);
+            }}
+          >
+            悬停展开
+          </button>
+        </div>
+      ) : null}
 
       <div className="menu-label">显示方式</div>
       <div className="menu-row">

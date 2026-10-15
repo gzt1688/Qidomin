@@ -212,49 +212,74 @@ body {
   gap: 8px;
 }
 
-/* ---------- 设置中心（左右分栏：左侧类目 + 右侧内容） ---------- */
+/* ---------- 设置中心 · Windows 11 风格 ----------
+ * 设计语言对齐 Win11 设置应用：
+ * - 左侧导航：透明底 + 圆角项 + 激活项左侧 accent 竖条
+ * - 右侧内容：白卡片式设置行（4px 圆角、行间留缝、hover 微灰）
+ * - 控件：分段式单选、Win11 胶囊开关、4px 圆角输入框
+ * - 强调色 #0067c0（Win11 系统蓝），仅作用于设置页，不影响分区面板观感
+ */
 .settings-body {
   flex: 1;
   min-height: 0;
   display: flex;
-  gap: 0; /* 左右紧贴：右侧内容区直接接在导航栏后面 */
+  gap: 0;
+  font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  color: #1b1b1b;
 }
 
+/* 左侧导航：Win11 不给导航画卡片，让它融进背景，激活项才是焦点 */
 .settings-nav {
-  flex: 0 0 138px;
+  flex: 0 0 128px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 10px 8px;
+  gap: 2px;
+  padding: 12px 6px 10px;
   overflow-y: auto;
-  background: var(--bg-glass);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: 0 2px 10px rgba(30, 80, 90, 0.08);
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .settings-nav-item {
+  position: relative;
   border: none;
   background: transparent;
   font-family: inherit;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 400;
+  color: #1b1b1b;
   text-align: left;
-  padding: 9px 10px;
-  border-radius: 8px;
+  padding: 8px 14px;
+  border-radius: 4px;
   cursor: pointer;
   white-space: nowrap;
+  transition: background 0.12s ease;
 }
 
 .settings-nav-item:hover {
-  background: var(--primary-light);
-  color: var(--primary-dark);
+  background: rgba(0, 0, 0, 0.047);
+  color: #1b1b1b;
 }
 
 .settings-nav-item.active {
-  background: var(--primary);
-  color: #ffffff;
+  background: rgba(0, 0, 0, 0.057);
+  color: #1b1b1b;
+  font-weight: 600;
+}
+
+/* 激活项左侧的 accent 指示条（Win11 导航的经典细节） */
+.settings-nav-item.active::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 16px;
+  border-radius: 2px;
+  background: #0067c0;
 }
 
 /* 布局备份：常驻导航栏底部（margin-top:auto 吸底），任何页签下都可见 */
@@ -262,9 +287,9 @@ body {
   margin-top: auto;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
 }
 
 .settings-nav-backup .btn {
@@ -276,54 +301,87 @@ body {
 
 .settings-nav-foot {
   margin-top: 0;
-  padding: 8px 10px 2px;
-  font-size: 12px;
-  color: var(--text-sub);
+  padding: 8px 14px 2px;
+  font-size: 11.5px;
+  color: rgba(0, 0, 0, 0.45);
 }
 
 .settings-wrap {
   flex: 1;
   min-width: 0;
   overflow-y: auto;
-  padding: 4px 8px 12px 0; /* 左边距归零，内容紧贴左侧导航 */
+  padding: 6px 16px 16px 6px;
 }
 
-.section-title {
-  color: var(--green-title);
-  font-size: 17px;
-  font-weight: bold;
-  margin: 14px 0 8px 0;
-  padding-left: 10px;
-  border-left: 4px solid var(--primary);
+/* 区块标题：Win11 风格 —— 大号半粗黑字，不再用左侧色条 */
+.settings-body .section-title {
+  color: #1b1b1b;
+  font-size: 20px;
+  font-weight: 600;
+  margin: 18px 4px 10px;
+  padding-left: 0;
+  border-left: none;
+  letter-spacing: 0.2px;
 }
 
-.data-table {
+/* 设置行 = 白卡片：行与行之间留 4px 缝（Win11 卡片列表的标准做法） */
+.settings-body .data-table {
   width: 100%;
-  border-collapse: collapse;
-  background: var(--bg-glass);
-  border-radius: 10px;
-  overflow: hidden;
-  box-shadow: 0 2px 10px rgba(30, 80, 90, 0.08);
+  border-collapse: separate;
+  border-spacing: 0 4px;
+  background: transparent;
+  border-radius: 0;
+  overflow: visible;
+  box-shadow: none;
 }
 
-.data-table th {
-  background: var(--primary);
-  color: #ffffff;
-  font-size: 14px;
-  font-weight: bold;
-  padding: 9px 12px;
+/* 表头行：同样成卡，但只是低调的灰字说明（Win11 不用彩色表头） */
+.settings-body .data-table th {
+  background: rgba(255, 255, 255, 0.6);
+  color: rgba(0, 0, 0, 0.5);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 14px;
   text-align: left;
+  border: none;
 }
 
-.data-table td {
-  padding: 8px 12px;
-  font-size: 14px;
-  font-weight: 500;
-  border-top: 1px solid var(--border);
+.settings-body .data-table th:first-child {
+  border-radius: 4px 0 0 4px;
+}
+.settings-body .data-table th:last-child {
+  border-radius: 0 4px 4px 0;
 }
 
-.data-table tr:hover td {
-  background: var(--primary-light);
+.settings-body .data-table td {
+  padding: 9px 14px;
+  font-size: 13.5px;
+  font-weight: 400;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(0, 0, 0, 0.045);
+  border-top: 1px solid rgba(0, 0, 0, 0.045);
+}
+
+/* 首列 = 设置项名称：semibold，卡片左缘圆角 */
+.settings-body .data-table td:first-child {
+  font-weight: 600;
+  border-radius: 4px 0 0 4px;
+  border-right: none;
+}
+
+.settings-body .data-table td:last-child {
+  border-radius: 0 4px 4px 0;
+  border-left: none;
+}
+
+/* 中间列（三列表格用）：去掉相邻边框，避免卡内出现双线 */
+.settings-body .data-table td:not(:first-child):not(:last-child) {
+  border-left: none;
+  border-right: none;
+}
+
+.settings-body .data-table tr:hover td {
+  background: #ffffff;
 }
 
 /* ---------- 鼠标映射表 ---------- */
@@ -370,81 +428,259 @@ body {
   margin: 10px 0 6px 0;
 }
 
-.radio-row {
+/* 单选组 → Win11 分段控件：隐藏原生圆点，每个选项是独立的 pill，
+ * 选中项 accent 蓝底白字（对齐 Win11「个性化」里的分段选择器） */
+.settings-body .radio-row {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
-.radio-item {
-  display: flex;
+.settings-body .radio-item {
+  position: relative;
+  display: inline-flex;
   align-items: center;
-  gap: 5px;
+  justify-content: center;
+  gap: 0;
+  padding: 5px 16px;
+  font-size: 13px;
+  color: #1b1b1b;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(0, 0, 0, 0.22);
+  border-radius: 4px;
   cursor: pointer;
-  font-size: 14px;
+  user-select: none;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
 }
 
-.radio-item input[type="radio"] {
-  accent-color: var(--primary);
-  width: 15px;
-  height: 15px;
-  cursor: pointer;
+.settings-body .radio-item:hover {
+  background: #f4f4f4;
 }
 
-.field-label {
-  font-size: 14px;
-  color: var(--text-sub);
+/* :has() 在 WebView2（Chromium 105+）可用；input 本身隐身，label 即可点击 */
+.settings-body .radio-item:has(input:checked) {
+  background: #0067c0;
+  border-color: #0067c0;
+  color: #ffffff;
+}
+
+.settings-body .radio-item:has(input:checked):hover {
+  background: #005fb0;
+}
+
+.settings-body .radio-item input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  margin: 0;
+  /* 保留可聚焦性，键盘用户 Tab 后用外框提示 */
+}
+
+.settings-body .radio-item:has(input:focus-visible) {
+  outline: 2px solid #0067c0;
+  outline-offset: 1px;
+}
+
+.settings-body .field-label {
+  font-size: 13px;
+  color: rgba(0, 0, 0, 0.55);
   margin-right: 4px;
 }
 
-.text-input,
-.select-input {
+.settings-body .text-input,
+.settings-body .select-input {
   font-family: inherit;
-  font-size: 14px;
-  font-weight: 600;
-  padding: 7px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  font-size: 13.5px;
+  font-weight: 400;
+  padding: 6px 10px;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  border-bottom-color: rgba(0, 0, 0, 0.55);
+  border-radius: 4px;
   outline: none;
+  background: rgba(255, 255, 255, 0.9);
+  color: #1b1b1b;
+  transition: border-color 0.12s ease;
+}
+
+.settings-body .text-input:hover,
+.settings-body .select-input:hover {
   background: #ffffff;
-  color: var(--text);
 }
 
-.text-input:focus,
-.select-input:focus {
-  border-color: var(--primary);
+.settings-body .text-input:focus,
+.settings-body .select-input:focus {
+  border-color: #0067c0;
+  border-bottom-width: 2px;
+  border-bottom-color: #0067c0;
+  padding-bottom: 5px; /* 补偿底边加粗，防跳动 */
 }
 
-.color-input {
+.settings-body .color-input {
   width: 56px;
-  height: 32px;
+  height: 30px;
   padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  border-radius: 4px;
   background: #ffffff;
   cursor: pointer;
   vertical-align: middle;
 }
 
-.color-swatch {
+.settings-body .color-swatch {
   width: 26px;
   height: 26px;
-  border-radius: 6px;
-  border: 2px solid #ffffff;
-  outline: 1px solid var(--border);
+  border-radius: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  outline: none;
   cursor: pointer;
   padding: 0;
+  transition: transform 0.1s ease;
 }
 
-.color-swatch.active {
-  outline: 2px solid var(--primary);
+.settings-body .color-swatch:hover {
+  transform: scale(1.1);
 }
 
-.switch-cell {
+.settings-body .color-swatch.active {
+  outline: 2px solid #0067c0;
+  outline-offset: 1px;
+}
+
+/* 复选开关 → Win11 胶囊开关：40×20 轨道 + 12px 滑块，选中变 accent 蓝 */
+.settings-body .switch-cell {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   cursor: pointer;
+  font-size: 13px;
+  color: rgba(0, 0, 0, 0.65);
+}
+
+.settings-body .switch-cell input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 40px;
+  height: 20px;
+  margin: 0;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  background: transparent;
+  position: relative;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+/* 滑块：伪元素画圆点（appearance:none 后 WebView2 支持 input 伪元素） */
+.settings-body .switch-cell input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  transition: left 0.15s ease, background 0.15s ease;
+}
+
+.settings-body .switch-cell input[type="checkbox"]:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.settings-body .switch-cell input[type="checkbox"]:checked {
+  background: #0067c0;
+  border-color: #0067c0;
+}
+
+.settings-body .switch-cell input[type="checkbox"]:checked::after {
+  left: 23px;
+  background: #ffffff;
+}
+
+.settings-body .switch-cell input[type="checkbox"]:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 设置页内按钮 → Win11 标准按钮：4px 圆角 + 底部 accent 细边（Win11 按钮的标志细节） */
+.settings-body .btn {
+  border: 1px solid rgba(0, 0, 0, 0.17);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.75);
+  color: #1b1b1b;
+  font-weight: 600;
+  font-size: 13px;
+  padding: 6px 16px;
+  box-shadow: inset 0 -1px 0 rgba(0, 103, 192, 0.55);
+  transition: background 0.12s ease;
+}
+
+.settings-body .btn:hover {
+  background: #f7f7f7;
+  color: #1b1b1b;
+}
+
+.settings-body .btn:active {
+  background: #ececec;
+}
+
+.settings-body .btn.ghost {
+  background: transparent;
+  color: #1b1b1b;
+  border: 1px solid rgba(0, 0, 0, 0.17);
+  box-shadow: none;
+}
+
+.settings-body .btn.ghost:hover {
+  background: rgba(0, 0, 0, 0.047);
+  color: #1b1b1b;
+}
+
+.settings-body .btn.small {
+  font-size: 12.5px;
+  padding: 4px 12px;
+}
+
+/* 主操作按钮（表单提交类）：accent 蓝填充 */
+.settings-body .btn.primary,
+.settings-body .rule-form .btn:not(.ghost) {
+  background: #0067c0;
+  border-color: rgba(0, 0, 0, 0.12);
+  color: #ffffff;
+  box-shadow: none;
+}
+
+.settings-body .btn.primary:hover,
+.settings-body .rule-form .btn:not(.ghost):hover {
+  background: #005fb0;
+  color: #ffffff;
+}
+
+/* Win11 细滚动条 */
+.settings-body ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.settings-body ::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.22);
+  border-radius: 5px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+.settings-body ::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.38);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+.settings-body ::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .link-btn {
@@ -461,6 +697,273 @@ body {
 
 .link-btn:hover {
   color: var(--primary-dark);
+}
+
+/* ---------- 托盘右键菜单（自绘 Win11 风格） ----------
+ * 窗口本身透明，.tmenu 是那张"菜单卡片"：白色磨砂底 + 8px 圆角 + 深悬浮阴影。
+ * 与 Win11 原生右键菜单同款观感：36px 行高、图标区、右侧状态文字、
+ * hover 浅灰高亮（内缩 4px 圆角），退出项用红字（危险操作惯例）。
+ */
+.tmenu-root {
+  width: 100vw;
+  height: 100vh;
+  padding: 0;
+  overflow: hidden;
+}
+
+.tmenu {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 5px;
+  background: rgba(249, 249, 249, 0.96);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.22);
+  user-select: none;
+}
+
+.tmenu-sep {
+  flex: 0 0 auto;
+  height: 1px;
+  margin: 4px 10px;
+  background: rgba(0, 0, 0, 0.09);
+}
+
+.tmenu-item {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  font-size: 13px;
+  color: #1b1b1b;
+  text-align: left;
+  cursor: default;
+  transition: background 0.1s ease;
+}
+
+.tmenu-item:hover {
+  background: rgba(0, 0, 0, 0.055);
+  color: #1b1b1b;
+}
+
+.tmenu-item:active {
+  background: rgba(0, 0, 0, 0.09);
+}
+
+.tmenu-item.danger {
+  color: #d13438;
+}
+
+.tmenu-item.danger:hover {
+  background: rgba(209, 52, 56, 0.08);
+  color: #d13438;
+}
+
+.tmenu-icon {
+  flex: 0 0 auto;
+  width: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #5c5c5c;
+}
+
+.tmenu-item.danger .tmenu-icon {
+  color: #d13438;
+}
+
+.tmenu-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 右侧状态文字（如"已开启"）：低调灰 */
+.tmenu-hint {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  color: rgba(0, 0, 0, 0.45);
+}
+
+/* 开机自启的勾选符：accent 蓝 */
+.tmenu-check {
+  flex: 0 0 auto;
+  width: 16px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #0067c0;
+  text-align: center;
+}
+
+/* ---------- 一键整理：预览对话框 ---------- */
+.orgp-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 40, 50, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.orgp-card {
+  width: min(560px, calc(100vw - 48px));
+  max-height: min(640px, calc(100vh - 80px));
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(10, 30, 40, 0.25);
+  padding: 14px 16px;
+  gap: 10px;
+}
+
+.orgp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.orgp-empty {
+  padding: 32px 0;
+  text-align: center;
+  color: var(--text-sub);
+}
+
+.orgp-busy {
+  background: #fff7e6;
+  border: 1px solid #ffe1a8;
+  color: #8a6116;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.orgp-summary {
+  font-size: 13px;
+  color: var(--text-main);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.orgp-select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-sub);
+  cursor: pointer;
+}
+
+.orgp-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  border: 1px solid var(--line, #e3e9ec);
+  border-radius: 8px;
+  min-height: 120px;
+}
+
+.orgp-group-head {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #f2f7f8;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--primary-dark, #0e7d8c);
+  border-bottom: 1px solid var(--line, #e3e9ec);
+}
+
+.orgp-group-count {
+  font-weight: 400;
+  color: var(--text-sub);
+}
+
+.orgp-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  border-bottom: 1px dashed rgba(150, 180, 190, 0.25);
+}
+
+.orgp-item:hover {
+  background: #f6fafb;
+}
+
+.orgp-item-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-main);
+}
+
+.orgp-item-meta {
+  flex: 0 0 auto;
+  color: var(--text-sub);
+}
+
+.orgp-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.orgp-foot-hint {
+  font-size: 12px;
+  color: var(--text-sub);
+}
+
+.orgp-result {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 0;
+}
+
+.orgp-result-line {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.orgp-errors {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: #b23b3b;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.orgp-last {
+  font-size: 12px;
+  color: var(--text-sub);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-top: 1px dashed var(--line, #e3e9ec);
+  padding-top: 8px;
 }
 
 /* ---------- 状态栏 ---------- */
@@ -504,7 +1007,7 @@ body {
 
 /* ---------- 关于 ---------- */
 .about-card {
-  max-width: 640px;
+  max-width: 760px;
   padding: 22px 24px;
   background: var(--bg-glass);
   border: 1px solid var(--border);
@@ -545,63 +1048,78 @@ body {
   color: var(--text-sub);
 }
 
-.about-desc {
-  margin-top: 16px;
-  font-size: 13.5px;
-  font-weight: 500;
-  line-height: 1.8;
+/* 开源免费声明卡：浅色淡雅底，标题用 accent 蓝点缀（Win11 风格的次级卡） */
+.about-opensource {
+  margin-top: 14px;
+  padding: 12px 16px;
+  background: linear-gradient(135deg, rgba(0, 103, 192, 0.07), rgba(21, 182, 201, 0.06));
+  border: 1px solid rgba(0, 103, 192, 0.18);
+  border-radius: 8px;
+}
+
+.about-opensource p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.75;
   color: var(--text);
   user-select: text;
 }
 
-.about-feats {
-  margin: 14px 0 0 0;
-  padding: 0;
-  list-style: none;
+.about-opensource b {
+  color: #005fb0;
+}
+
+/* 打赏区：左文右码，紧跟品牌行 —— 打开"关于"第一屏就能看到 */
+.about-donate {
+  margin-top: 16px;
+  padding: 18px 20px;
   display: flex;
-  flex-direction: column;
-  gap: 7px;
+  align-items: center;
+  gap: 24px;
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 
-.about-feats li {
-  position: relative;
-  padding-left: 16px;
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 1.6;
-  color: var(--text);
+.about-donate-text {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
-.about-feats li::before {
-  content: "";
-  position: absolute;
-  left: 2px;
-  top: 8px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--primary);
-}
-
-.about-feats b {
-  color: var(--primary-dark);
+.about-donate-title {
+  font-size: 16px;
   font-weight: 700;
+  color: var(--green-title);
 }
 
-.about-meta {
-  margin-top: 18px;
-  padding-top: 14px;
-  border-top: 1px dashed var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 12.5px;
+.about-donate-sub {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 1.8;
   color: var(--text-sub);
 }
 
-.about-meta b {
-  color: var(--text);
-  font-weight: 700;
+/* 二维码：白底内衬 + 细边框。210px 见方，手机随便一扫就中 */
+.about-donate-qr {
+  flex: 0 0 auto;
+  width: 210px;
+  height: 210px;
+  object-fit: contain;
+  padding: 8px;
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(30, 60, 70, 0.1);
+}
+
+.about-meta {
+  margin-top: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 18px;
+  font-size: 12px;
+  color: var(--text-sub);
 }
 
 ::-webkit-scrollbar {
@@ -650,6 +1168,68 @@ body {
   border-color: rgba(120, 130, 140, 0.35);
 }
 /* 锁定后悬停不再清空背景（以前会透出壁纸，像消失了） */
+
+/* ---------- 胶囊模式（分区收起态） ---------- */
+/* 窗口本身只有 150×34（物理尺寸由后端按 DPI 折算），这里铺满即可 */
+.box-capsule {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border-radius: 17px;
+  background: var(--box-bg, rgba(255, 255, 255, 0.85));
+  border: 1px solid rgba(90, 140, 160, 0.45);
+  box-shadow: 0 2px 8px rgba(20, 50, 60, 0.12);
+  cursor: pointer;
+  user-select: none;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.box-capsule:hover {
+  background: var(--box-bg-hover, rgba(255, 255, 255, 0.95));
+  border-color: rgba(90, 140, 160, 0.75);
+}
+
+/* 文件拖到胶囊上：高亮提示可丢进来 */
+.box-capsule.drag-over {
+  border-color: var(--primary, #15b6c9);
+  border-width: 2px;
+  padding: 0 9px;
+}
+
+.box-capsule-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.box-capsule-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  line-height: 1;
+  color: rgba(30, 50, 60, 0.9);
+}
+
+/* 深色壁纸下可读性：给文字一点抗混边（不影响透明背景） */
+.box-capsule-title,
+.box-capsule-count {
+  paint-order: stroke fill;
+  -webkit-text-stroke: 0.35px rgba(255, 255, 255, 0.35);
+}
+
+.box-capsule-count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  line-height: 1;
+  color: rgba(30, 50, 60, 0.55);
+}
 
 .box-win-head {
   display: flex;
