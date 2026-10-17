@@ -1077,7 +1077,11 @@ pub fn reorganize_from_history(db: &Db) -> Result<u32, String> {
                 hide_dir(parent);
             }
         }
-        if fs::rename(src, dst).is_ok() {
+        // 必须走 transfer_to_exact 而不是裸 fs::rename：原始位置在别的盘
+        // （桌面在 C:、文件在 D:/E:/U 盘）时，rename 会抛"跨设备"错误并在此
+        // 被静默吞掉，结果退出归还成功、启动收回却失败，文件永远回不了分区。
+        // transfer_to_exact 会自动降级成"复制 + 删源"，与拖入/退出归还同口径。
+        if transfer_to_exact(src, dst).is_ok() {
             moved += 1;
         }
     }
