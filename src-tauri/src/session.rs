@@ -131,8 +131,8 @@ fn restore_desktop_files(why: &str) {
         Ok(0) => crate::log_msg(&format!("{why}: 没有需要归还的文件")),
         Ok(n) => {
             crate::log_msg(&format!("{why}: 已归还 {n} 个文件到桌面"));
-            // 让桌面立刻重画，不用手工 F5
-            crate::shellicon::refresh_desktop_icons();
+            // 让桌面立刻重画，不用手工 F5（轻量通知即可，不需要重建图标缓存）
+            crate::shellicon::refresh_desktop_light();
         }
         Err(e) => crate::log_msg(&format!("{why}: 归还失败：{e}")),
     }
@@ -254,7 +254,7 @@ fn restore_desktop_files_with(db: &crate::db::Db, why: &str) {
         Ok(n) => {
             crate::log_msg(&format!("{why}: {n} 个文件已回到桌面"));
             if n > 0 {
-                crate::shellicon::refresh_desktop_icons();
+                crate::shellicon::refresh_desktop_light();
             }
         }
         Err(e) => crate::log_msg(&format!("{why}: 失败：{e}")),

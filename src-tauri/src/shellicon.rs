@@ -384,6 +384,31 @@ pub fn refresh_desktop_icons() {
     });
 }
 
+/// 仅桌面目录（用户桌面 + 公共桌面），轻量刷新用
+fn desktop_dirs_only() -> Vec<std::path::PathBuf> {
+    let mut v = Vec::new();
+    if let Ok(u) = std::env::var("USERPROFILE") {
+        v.push(format!(r"{u}\Desktop").into());
+    }
+    if let Ok(p) = std::env::var("PUBLIC") {
+        v.push(format!(r"{p}\Desktop").into());
+    }
+    v
+}
+
+/// 轻量刷新：只给桌面目录发一条"内容变了，重新读一遍"（SHCNE_UPDATEDIR）。
+///
+/// 文件在桌面和分区文件夹之间搬动**不改变图标覆盖注册表**，完全不需要重建图标缓存 ——
+/// 之前这里错用了 [`refresh_desktop_icons`]（ASSOCCHANGED 同步重建 + ie4uinit×2 +
+/// 全盘逐项通知），一次要好几秒，这就是退出/启动时图标"展示/退回"非常卡的原因。
+/// explorer 自己盯着桌面目录，一条 UPDATEDIR（`SHCNF_FLUSHNOWAIT`，不等处理完）
+/// 让它立即重画即可，毫秒级返回。
+pub fn refresh_desktop_light() {
+    for dir in desktop_dirs_only() {
+        notify_path(SHCNE_UPDATEDIR, &dir.to_string_lossy());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 对外：开关 + 兜底
 // ---------------------------------------------------------------------------

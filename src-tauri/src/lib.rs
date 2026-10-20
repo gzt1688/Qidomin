@@ -1095,7 +1095,8 @@ pub fn quit_app(app: &AppHandle) {
         }
     };
     if n > 0 {
-        shellicon::refresh_desktop_icons();
+        // 文件搬回桌面只需让 explorer 重读桌面目录，不需要重建图标缓存（重路径要好几秒）
+        shellicon::refresh_desktop_light();
     }
     // 标记在进这条分支时就已经销掉了（见上）：守卫进程看到标记没了就不会再动文件
     app.exit(0);
@@ -1298,7 +1299,7 @@ pub fn run() {
                         Ok(0) => {}
                         Ok(n) => {
                             log_msg(&format!("非正常退出后归还文件：{n} 个"));
-                            shellicon::refresh_desktop_icons();
+                            shellicon::refresh_desktop_light();
                         }
                         Err(e) => log_msg(&format!("return_all_to_desktop (unclean) failed: {e}")),
                     }
@@ -1318,8 +1319,9 @@ pub fn run() {
                         Ok(0) => {}
                         Ok(n) => {
                             log_msg(&format!("启动收回文件：{n} 个"));
-                            // 文件刚被搬进隐藏的分区文件夹，桌面自己不会立刻重画
-                            shellicon::refresh_desktop_icons();
+                            // 文件刚被搬进隐藏的分区文件夹，桌面自己不会立刻重画；
+                            // 轻量通知即可，重路径（重建图标缓存）会拖慢分区窗口打开
+                            shellicon::refresh_desktop_light();
                         }
                         Err(e) => log_msg(&format!("reorganize_from_history failed: {e}")),
                     }
@@ -1496,7 +1498,8 @@ pub fn run() {
                             Ok(n) => log_msg(&format!("退出归还文件：{n} 个")),
                             Err(e) => log_msg(&format!("return_all_to_desktop failed: {e}")),
                         }
-                        shellicon::refresh_desktop_icons();
+                        // 轻量通知即可：关机/注销时系统给的时间很短，重路径跑不完反而坏事
+                        shellicon::refresh_desktop_light();
                     }
                 }
                 _ => {}
