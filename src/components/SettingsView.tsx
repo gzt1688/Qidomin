@@ -81,7 +81,7 @@ function UndoOrganizeRow({
   );
 }
 
-const APP_VERSION = "V1.3-2026-10-15";
+const APP_VERSION = "V1.4-2026-10-24";
 
 type TabKey = "basic" | "search" | "radial" | "widgets" | "hotkeys" | "about";
 

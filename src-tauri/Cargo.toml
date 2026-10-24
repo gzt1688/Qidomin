@@ -1,6 +1,6 @@
 [package]
 name = "qidomin"
-version = "1.3.0"
+version = "1.4.0"
 description = "Qidomin - 让桌面回归秩序"
 edition = "2021"
 
