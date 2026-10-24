@@ -67,6 +67,13 @@ pub struct BoxWindowCfg {
     /// 与 monitor_key 配合：分辨率变了 / 屏幕排列换了也能找回原来的位置。
     #[serde(default)]
     pub rel: Option<[f64; 2]>,
+    /// 收起态窗口的真实物理尺寸 [w, h]（圆钮直径 / 胶囊尺寸 × DPI）。
+    /// rel 比例反推必须用"落盘当时的窗口物理尺寸"——启动建窗前拿不到真实
+    /// scale factor，老逻辑用逻辑估算值（如 RADIAL_BTN 常量）反推，高 DPI 屏上
+    /// 与实际物理尺寸差一个缩放量，圆钮贴右/下边缘时重启位置明显偏移。
+    /// 缺省 None = 老数据，回退估算值（用户拖一下圆钮即自动补上）。
+    #[serde(default)]
+    pub rest_wh: Option<[i32; 2]>,
 }
 
 fn default_capsule_hover() -> bool {
@@ -128,6 +135,7 @@ impl BoxWindowCfg {
             radial_icon: String::new(),
             monitor_key: String::new(),
             rel: None,
+            rest_wh: None,
         }
     }
 }
@@ -1186,27 +1194,6 @@ impl Db {
 
     pub fn get_box_window_cfg(&self, id: i64) -> Result<Option<BoxWindowCfg>, String> {
         Ok(self.get_box_windows_cfg()?.into_iter().find(|c| c.id == id))
-    }
-
-    /// 保存某个分区的窗口配置。
-    ///
-    /// "读列表 → 改一项 → 写回"必须在**同一把锁**里做完：所有分区共用 `boxWindows`
-    /// 这一个设置键，如果读和写之间被别的分区插进来（例如另一个分区正在拖动，
-    /// 后端 persist_cfg 也在写），就会发生丢更新 —— 表现为"改了 A 分区，B 分区的
-    /// 配置莫名其妙退回旧值"。
-    pub fn set_box_window_cfg(&self, cfg: &BoxWindowCfg) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let mut list: Vec<BoxWindowCfg> = match Self::get_setting_with(&conn, "boxWindows")? {
-            Some(json) => serde_json::from_str(&json).map_err(|e| e.to_string())?,
-            None => Vec::new(),
-        };
-        if let Some(existing) = list.iter_mut().find(|c| c.id == cfg.id) {
-            *existing = cfg.clone();
-        } else {
-            list.push(cfg.clone());
-        }
-        let json = serde_json::to_string(&list).map_err(|e| e.to_string())?;
-        Self::set_setting_with(&conn, "boxWindows", &json)
     }
 
     /// 在**同一把锁**内完成"读列表 → 改一项 → 写回"。

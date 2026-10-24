@@ -1570,6 +1570,7 @@ fn import_layout_db(
                 // 带着旧绑定反而会把分区摆到错误的位置
                 monitor_key: String::new(),
                 rel: None,
+                rest_wh: None,
             });
         }
     }
@@ -1833,12 +1834,36 @@ pub fn save_box_window_cfg(
     cfg: BoxWindowCfg,
 ) -> Result<(), String> {
     let prev = db.get_box_window_cfg(cfg.id)?;
-    db.set_box_window_cfg(&cfg)?;
+    // **几何字段一律以库里现值为准，不被前端覆盖**：前端 updateCfg 发回的是
+    // “加载那一刻”的整份配置，里面的 x/y/w/h 早就过期（圆钮被拖过、或饼型
+    // 展开/收回时窗口矩形变过）。整体写回会把后端 persist_cfg 记录的实时位置
+    // 顶掉 —— 表现就是摆放好的饼型图标（尤其贴屏幕边缘、展开时有平移的）
+    // 重启后圆钮偏移。窗口几何的权威来源只有后端的 Moved/Resized 落盘。
+    let id = cfg.id;
+    let locked = cfg.locked;
+    db.update_box_window_cfg(id, |c| {
+        c.icon_size = cfg.icon_size;
+        c.bg_color = cfg.bg_color;
+        c.bg_opacity = cfg.bg_opacity;
+        c.label_color = cfg.label_color;
+        c.view_mode = cfg.view_mode;
+        c.item_order = cfg.item_order;
+        c.gap_x = cfg.gap_x;
+        c.gap_y = cfg.gap_y;
+        // collapsed / expanded_geom 也不回写：胶囊收起/展开几何由后端
+        // set_box_collapsed 统一维护，前端在竞态时刻发回的是旧快照
+        c.capsule_hover = cfg.capsule_hover;
+        c.radial_style = cfg.radial_style;
+        c.radial_show_title = cfg.radial_show_title;
+        c.radial_show_names = cfg.radial_show_names;
+        c.radial_icon = cfg.radial_icon;
+        c.locked = locked;
+    })?;
     // 锁定状态变化时同步切换原生窗口的可拉伸边框：
     // 锁定 = 不能拖动（前端挡）+ 不能拉伸（去掉 WS_THICKFRAME，窗口样式这一层）
-    if prev.as_ref().map(|c| c.locked) != Some(cfg.locked) {
-        if let Some(win) = app.get_webview_window(&format!("box-{}", cfg.id)) {
-            let _ = win.set_resizable(!cfg.locked);
+    if prev.as_ref().map(|c| c.locked) != Some(locked) {
+        if let Some(win) = app.get_webview_window(&format!("box-{id}")) {
+            let _ = win.set_resizable(!locked);
         }
     }
     Ok(())

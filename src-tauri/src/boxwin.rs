@@ -140,9 +140,30 @@ fn persist_cfg(window: &WebviewWindow, box_id: i64, force: bool) {
     let Ok(pos) = window.outer_position() else { return };
     let Ok(size) = window.outer_size() else { return };
     let (x, y, w, h) = (pos.x, pos.y, size.width as i32, size.height as i32);
+    // **临时展开态不落几何**：悬停临时展开（胶囊）/ 单击弹出（饼型）都会把窗口
+    // 物理尺寸临时放大，同时触发 Moved/Resized → 走到这里。collapsed 分支挡住了
+    // w/h，但 **x/y 和 rel/monitor_key 没挡** —— 展开窗口的左上角会被当成圆钮 /
+    // 胶囊位置写进配置，重启后圆钮位置就偏了（用户实测：摆放好的饼图标重启后偏移）。
+    // 判定：当前窗口物理尺寸明显大于"收起态应有尺寸"（圆钮直径 / 胶囊尺寸）即为临时展开。
+    let sf = window.scale_factor().unwrap_or(1.0);
+    let cfg_now = app.state::<Db>().get_box_window_cfg(box_id).ok().flatten();
+    let is_radial = cfg_now
+        .as_ref()
+        .map(|c| !c.radial_style.is_empty())
+        .unwrap_or(false);
+    let was_collapsed = cfg_now.as_ref().map(|c| c.collapsed).unwrap_or(false);
+    let (rest_w, _) = if is_radial {
+        radial_btn_size(radial_btn_logical(&app.state::<Db>()), sf)
+    } else {
+        capsule_size(sf)
+    };
+    let temp_expanded = w > rest_w + 16 || h > rest_w + 16;
     // 每次移动/调整都缓存最新几何：窗口销毁或程序退出时（节流可能已丢掉最后一帧）
     // 用缓存把"最终位置"落盘，重启后布局才和退出前完全一致。
-    bw.cache_geom(box_id, x, y, w, h);
+    // 临时展开态不缓存 —— 否则退出兜底会把展开几何当成圆钮位置落盘。
+    if !temp_expanded {
+        bw.cache_geom(box_id, x, y, w, h);
+    }
     if !force && !bw.should_save(box_id) {
         return;
     }
@@ -163,18 +184,33 @@ fn persist_cfg(window: &WebviewWindow, box_id: i64, force: bool) {
     let mon_key = mon.map(|m| m.key);
     let db = app.state::<Db>();
     let _ = db.update_box_window_cfg(box_id, |c| {
-        c.x = x;
-        c.y = y;
+        if !temp_expanded {
+            c.x = x;
+            c.y = y;
+            if c.collapsed {
+                // 收起态（圆钮/胶囊）的真实物理尺寸：rel 比例反推必须用它，
+                // 否则高 DPI 屏上按逻辑估算值反推会偏移（见 rest_wh 字段注释）
+                c.rest_wh = Some([w, h]);
+            }
+        }
         if !c.collapsed {
             c.w = w;
             c.h = h;
         }
         c.visible = visible;
-        if let Some(key) = mon_key {
-            c.monitor_key = key;
-            c.rel = rel;
+        if !temp_expanded {
+            if let Some(key) = mon_key {
+                c.monitor_key = key;
+                c.rel = rel;
+            }
         }
     });
+    // 诊断日志：定位"圆钮重启后位置偏移"用——对比退出前落盘值与启动恢复值
+    if was_collapsed && !temp_expanded {
+        crate::log_msg(&format!(
+            "geom-persist box={box_id} x={x} y={y} w={w} h={h} rel={rel:?} force={force}"
+        ));
+    }
 }
 
 /// 强制窗口不在任务栏显示：设置 WS_EX_TOOLWINDOW 并清除 WS_EX_APPWINDOW
@@ -2100,12 +2136,23 @@ fn capsule_size(sf: f64) -> (i32, i32) {
     )
 }
 
-/// 饼型菜单圆钮尺寸（物理像素）。
-fn radial_btn_size(sf: f64) -> (i32, i32) {
-    (
-        (RADIAL_BTN * sf).round().max(40.0) as i32,
-        (RADIAL_BTN * sf).round().max(40.0) as i32,
-    )
+/// 饼型菜单圆钮尺寸（物理像素），按用户配置的直径 × scale factor 折算。
+fn radial_btn_size(logical: f64, sf: f64) -> (i32, i32) {
+    let d = (logical * sf).round().max(40.0) as i32;
+    (d, d)
+}
+
+/// 用户配置的饼型圆钮直径（逻辑像素）。读设置失败 / 非法值回退默认 54。
+/// 建窗必须按它来：否则后端先按常量 54 建小圆钮，前端延迟 300ms 的校正
+/// effect 再把它撑到设置直径 —— 表现就是软件刚打开时圆钮"先小后大"跳一下。
+fn radial_btn_logical(db: &Db) -> f64 {
+    db.get_setting("app")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<crate::commands::AppSettings>(&s).ok())
+        .map(|a| a.radial_btn_size)
+        .filter(|v| *v > 0)
+        .unwrap_or(RADIAL_BTN as i32) as f64
 }
 
 /// 该分区是不是饼型菜单（radial_style 非空）。
@@ -2147,22 +2194,25 @@ fn resolve_box_geometry(
 ) -> (i32, i32, bool) {
     let (w, h) = (w.max(MIN_BOX_W), h.max(MIN_BOX_H));
     if let Some(c) = cfg {
-        // 分区绑定了显示器（多屏场景）：按硬件身份找回它归属的那块屏，
-        // 用比例位置落位 —— 分辨率改了 / 显示器排列换了，分区都跟着自己的屏走。
-        // 找不到（这台屏现在没接）才落到下面的通用兜底。
+        // **用户摆好的绝对位置只要现在还够得着，就原样用它**（最常见的重启场景：
+        // 屏幕没变，只是重开程序）。这条必须排在 rel 比例反推**之前** ——
+        // rel 反推贴屏幕边时会被 clamp 到 0/1 丢精度，高 DPI 屏上 w/h 又用的是
+        // rest_wh 估算值，反推结果整体偏移（表现就是底部一排整齐摆好的圆钮，
+        // 重启后总有一两个往上挪一点：走 rel 反推的偏了，走绝对坐标的没偏）。
+        if rect_reachable(c.x, c.y, w, h) {
+            return (c.x, c.y, false);
+        }
+        // 绝对位置已经跑到屏幕外（分辨率改了 / 显示器排列换了）才启用多屏绑定：
+        // 按硬件身份找回分区归属的那块屏，用比例位置把它搬回该屏内的原来相对位置。
+        // 找不到那块屏（现在没接）就落到下面的通用兜底。
         if !c.monitor_key.is_empty() {
             if let Some(rel) = c.rel {
                 if let Some(mon) = all_monitors().iter().find(|m| m.key == c.monitor_key) {
                     let (x, y) = abs_from_rel(mon.work, rel, w, h);
                     let (x, y) = clamp_into(mon.work, x, y, w, h);
-                    return (x, y, false);
+                    return (x, y, true);
                 }
-                // 归属的屏不在了：继续用绝对坐标走兜底（大概率整块在外 → 重新安置）
             }
-        }
-        // 用户自己摆好的位置优先，原样保留
-        if rect_reachable(c.x, c.y, w, h) {
-            return (c.x, c.y, false);
         }
         if overlaps_any_monitor(c.x, c.y, w, h) {
             // 只出了半截 → 夹回它所在那块屏的工作区
@@ -2222,13 +2272,25 @@ fn open_box_window_with_cfg(
     // 展开几何从 expanded_geom 恢复，cfg.w/h 不参与。
     let collapsed = cfg.as_ref().map(|c| c.collapsed).unwrap_or(false);
     let radial = is_radial(cfg.as_ref());
+    // 饼型圆钮按用户配置的直径建窗（常量 54 只是默认值），否则启动时
+    // 会先看到小圆、等前端校正 effect 触发后再撑大——一下跳变很难看。
+    let radial_logical = if radial { radial_btn_logical(db) } else { RADIAL_BTN };
     // 逻辑像素估算值（建窗后按真实 scale factor 校正）：
     // 胶囊 = 胶囊尺寸；饼型菜单 = 圆钮尺寸（它永远处于收起语义）
     let (w, h, visible, locked, degenerate) = if collapsed {
-        let (lw, lh) = if radial { (RADIAL_BTN, RADIAL_BTN) } else { (CAPSULE_W, CAPSULE_H) };
+        let (lw, lh) = if radial { (radial_logical, radial_logical) } else { (CAPSULE_W, CAPSULE_H) };
+        // rel 比例反推必须用"落盘当时的物理尺寸"（rest_wh）：建窗前拿不到真实
+        // scale factor，用逻辑估算值反推会让圆钮/胶囊在高 DPI 屏上重启后偏移。
+        // 老数据没有 rest_wh 才回退估算值，拖动一次即自动补上。
+        let (pw, ph) = cfg
+            .as_ref()
+            .and_then(|c| c.rest_wh)
+            .map_or((lw as i32, lh as i32), |r| {
+                (r[0].max(lw as i32), r[1].max(lh as i32))
+            });
         (
-            lw as i32,
-            lh as i32,
+            pw as i32,
+            ph as i32,
             cfg.as_ref().map(|c| c.visible).unwrap_or(true),
             cfg.as_ref().map(|c| c.locked).unwrap_or(false),
             false,
@@ -2245,6 +2307,19 @@ fn open_box_window_with_cfg(
     // 落点：尊重用户摆好的位置；整块跑到屏幕外（历史遗留）或新建的 → 重新安置到工作区空位
     let usable_cfg = if degenerate { None } else { cfg.as_ref() };
     let (x, y, repaired) = resolve_box_geometry(db, box_id, w, h, usable_cfg);
+    // 诊断日志：启动恢复的落点与依据，配合 geom-persist 对比定位偏移环节
+    if collapsed {
+        crate::log_msg(&format!(
+            "geom-restore box={box_id} cfg=({},{},{},{}) rest_wh={:?} rel={:?} mon={:?} -> ({x},{y}) repaired={repaired}",
+            cfg.as_ref().map(|c| c.x).unwrap_or(0),
+            cfg.as_ref().map(|c| c.y).unwrap_or(0),
+            cfg.as_ref().map(|c| c.w).unwrap_or(0),
+            cfg.as_ref().map(|c| c.h).unwrap_or(0),
+            cfg.as_ref().and_then(|c| c.rest_wh),
+            cfg.as_ref().and_then(|c| c.rel),
+            cfg.as_ref().map(|c| c.monitor_key.clone()),
+        ));
+    }
     if cfg.is_some() && (repaired || degenerate) {
         if repaired {
             crate::log_msg(&format!(
@@ -2289,7 +2364,11 @@ fn open_box_window_with_cfg(
     // 普通分区：配置存的就是物理像素，直接用（下限兜底防退化）。
     if collapsed {
         if let Ok(sf) = win.scale_factor() {
-            let (cw, ch) = if radial { radial_btn_size(sf) } else { capsule_size(sf) };
+            let (cw, ch) = if radial {
+                radial_btn_size(radial_logical, sf)
+            } else {
+                capsule_size(sf)
+            };
             let _ = win.set_size(PhysicalSize::new(cw.max(1) as u32, ch.max(1) as u32));
         }
     } else {
