@@ -50,7 +50,7 @@ export function getBoxIcons(boxId: number): Promise<IconItem[]> {
 export function createBox(
   name: string,
   color: string,
-  boxType?: "software" | "file" | "folder",
+  boxType?: "software" | "file" | "folder" | "radial",
   linkPath?: string
 ): Promise<string> {
   return invoke("create_box", { name, color, boxType, linkPath });
@@ -209,6 +209,34 @@ export function setAutoStartEnabled(enable: boolean): Promise<void> {
 
 export function startBoxDrag(boxId: number, forceMoved: boolean): Promise<void> {
   return invoke("start_box_drag", { boxId, forceMoved });
+}
+
+// ---------- 饼型分区嵌套进普通分区 ----------
+
+/** 可嵌套落点：光标当前位置下能收留饼型分区的宿主（普通文件/软件分区），没有则 null。
+ *  判定 = 光标点落在宿主窗口矩形内（严格"压上去"才算），没有落点不会误嵌套 */
+export function findNestTarget(exclude: number): Promise<{ id: number; name: string } | null> {
+  return invoke("find_nest_target", { exclude });
+}
+
+/** 把饼型分区嵌进宿主分区（圆钮隐藏，只在宿主文件列表里留一个条目） */
+export function nestRadialBox(boxId: number, target: number): Promise<void> {
+  return invoke("nest_radial_box", { boxId, target });
+}
+
+/** 把嵌套的饼型分区移出宿主，恢复成桌面独立圆钮 */
+export function unnestRadialBox(boxId: number): Promise<void> {
+  return invoke("unnest_radial_box", { boxId });
+}
+
+/** 打开嵌套的饼型分区（cx/cy = 条目中心的物理屏幕坐标，圆钮出现在那里并展开） */
+export function showNestedRadial(boxId: number, cx: number, cy: number): Promise<void> {
+  return invoke("show_nested_radial", { boxId, cx, cy });
+}
+
+/** 嵌套的饼型分区收回圆钮后重新隐藏（回宿主列表里去） */
+export function hideNestedRadial(boxId: number): Promise<void> {
+  return invoke("hide_nested_radial", { boxId });
 }
 
 /** 拉伸吸附候选：其它分区 / 便签 / 屏幕工作区（物理像素）+ 吸附阈值 */

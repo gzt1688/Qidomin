@@ -582,9 +582,29 @@ pub(crate) fn create_box_and_open(
     name: &str,
     color: &str,
 ) -> Result<String, String> {
+    create_box_and_open_typed(app, db, name, color, "file")
+}
+
+/// 带 box_type 的建分区入口（托盘「新建饼型菜单」等用）。
+pub(crate) fn create_box_and_open_typed(
+    app: &AppHandle,
+    db: &Db,
+    name: &str,
+    color: &str,
+    box_type: &str,
+) -> Result<String, String> {
     // 名字统一交给后端定：`name` 只是"想要的"，被占用会自动换成可用的
-    let name = commands::resolve_box_name(db, name, "file")?;
-    let box_id = commands::insert_box_row(db, &name, color, "file", None)?;
+    let name = commands::resolve_box_name(db, name, box_type)?;
+    let box_id = commands::insert_box_row(db, &name, color, box_type, None)?;
+    // 饼型菜单分区：先落"圆钮 + 默认样式(pie)"的窗口配置（与 create_box 命令同口径）
+    if box_type == "radial" {
+        db.update_box_window_cfg(box_id, |c| {
+            c.radial_style = "pie".into();
+            c.collapsed = true;
+            c.x = 120;
+            c.y = 120;
+        })?;
+    }
     if let Err(e) = engine::ensure_box_dir(&name) {
         let _ = db
             .conn
@@ -1073,33 +1093,54 @@ fn cursor_point() -> Option<(i32, i32)> {
     None
 }
 
+/// 退出重活（几何落盘 + 归还文件）只允许跑一遍。
+/// 托盘「退出」和 RunEvent 兜底都会触发清理，没有它就会同步跑两遍归还。
+static EXIT_CLEANUP_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// 退出前的收尾（托盘菜单"退出"调用）：归还文件 → 落盘 → 退出。
 pub fn quit_app(app: &AppHandle) {
-    // 先销"正常退出"标记，再做落盘/归还（这一步可能被打断或失败，
-    // 但只要标记没了，下次启动就会按搬运记录把文件收回分区）
-    session::mark_clean_exit();
-    // 退出前把分区窗口的最终几何强制落盘（节流可能丢最后一帧），
-    // 保证重启后的布局和退出那一刻一致
-    boxwin::persist_all_geometry(app);
-    // 退出前把分区里的文件归还桌面：程序没开的时候桌面是"正常"的，
-    // 下次启动再按移动记录收回来（engine::reorganize_from_history）
-    let db = app.state::<Db>();
-    let n = match engine::return_all_to_desktop(&db) {
-        Ok(n) => {
-            log_msg(&format!("退出归还文件：{n} 个"));
-            n
-        }
-        Err(e) => {
-            log_msg(&format!("return_all_to_desktop failed: {e}"));
-            0
-        }
-    };
-    if n > 0 {
-        // 文件搬回桌面只需让 explorer 重读桌面目录，不需要重建图标缓存（重路径要好几秒）
-        shellicon::refresh_desktop_light();
+    // 一次退出只做一遍重活：重复点「退出」、RunEvent 兜底都靠这个标记去重
+    if EXIT_CLEANUP_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return; // 清理已在跑，由它负责调 app.exit
     }
-    // 标记在进这条分支时就已经销掉了（见上）：守卫进程看到标记没了就不会再动文件
-    app.exit(0);
+    // 先销"正常退出"标记，再做重活（这一步可能被打断或失败，但只要标记没了，
+    // 下次启动就会按搬运记录把文件收回分区）
+    session::mark_clean_exit();
+    // 立刻叫停桌面守护线程：退出阶段窗口逐个销毁，守护还在对它们做跨线程
+    // SetWindowPos/ShowWindow，与主线程的销毁流程互锁时会卡死退出
+    boxwin::stop_desktop_keeper();
+    // 重活全部放到后台线程：归还几十个文件是同步 IO（每挪一个文件都可能被
+    // 杀软扫一遍），以前直接在 UI 线程跑——表现为"点退出后所有窗口冻住几秒，
+    // 图标都回桌面了程序还卡着"。后台跑完后由它触发真正的退出。
+    let app2 = app.clone();
+    let spawned = std::thread::Builder::new()
+        .name("exit-cleanup".into())
+        .spawn(move || {
+            boxwin::persist_all_geometry(&app2);
+            let db = app2.state::<Db>();
+            let n = match engine::return_all_to_desktop(&db) {
+                Ok(n) => {
+                    log_msg(&format!("退出归还文件：{n} 个"));
+                    n
+                }
+                Err(e) => {
+                    log_msg(&format!("return_all_to_desktop failed: {e}"));
+                    0
+                }
+            };
+            if n > 0 {
+                // 文件搬回桌面只需让 explorer 重读桌面目录，不需要重建图标缓存
+                shellicon::refresh_desktop_light();
+            }
+            drop(db);
+            log_msg("退出清理完成，正在退出");
+            app2.exit(0);
+        });
+    // 线程都起不来（极端情况）就直接退，守卫进程兜底归还
+    if spawned.is_err() {
+        app.exit(0);
+    }
 }
 
 /// 单实例检测：已有健康实例则返回 true（本实例应退出）；已有实例卡死/无响应则返回 false（本实例接管继续启动）
@@ -1411,6 +1452,12 @@ pub fn run() {
             commands::widget_menu_request,
             commands::widget_menu_pick,
             commands::start_file_drag,
+            commands::set_radial_floating,
+            commands::find_nest_target,
+            commands::nest_radial_box,
+            commands::unnest_radial_box,
+            commands::show_nested_radial,
+            commands::hide_nested_radial,
             commands::get_notes,
             commands::add_note,
             commands::save_note,
@@ -1483,23 +1530,30 @@ pub fn run() {
         .expect("Qidomin 启动失败")
         .run(|app_handle, event| {
             // 兜住其它退出方式（系统注销/关机等）：退出前把分区文件归还桌面。
-            // 托盘「退出」那条路已经做过一次，这里再跑一遍也安全（幂等）。
             match event {
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
-                    // **退出标记先销、重活后干**（见 session::graceful_exit 的说明）：
-                    // 关机/注销时系统给的时间很短，几何落盘 + 归还几十个文件很可能跑不完
-                    // 就被杀掉。标记要是留到最后删，下次启动就会把这次退出判成"崩溃"，
-                    // 走归还桌面那条路，开机后图标收不回分区。
-                    session::mark_clean_exit();
-                    // 任何退出方式（托盘/注销/关机）都先把分区几何强制落盘，再归还文件
-                    boxwin::persist_all_geometry(app_handle);
-                    if let Some(db) = app_handle.try_state::<Db>() {
-                        match engine::return_all_to_desktop(&db) {
-                            Ok(n) => log_msg(&format!("退出归还文件：{n} 个")),
-                            Err(e) => log_msg(&format!("return_all_to_desktop failed: {e}")),
+                    // 退出阶段先停守护线程：窗口正在销毁，跨线程窗口操作会与
+                    // 销毁流程互锁，是"退出卡死"的元凶之一（幂等，重复调用无害）
+                    boxwin::stop_desktop_keeper();
+                    // 托盘「退出」已在后台线程做过全套清理（EXIT_CLEANUP_STARTED 去重），
+                    // 这里只兜直接走到这里的退出路径，避免归还重活跑两遍
+                    if !EXIT_CLEANUP_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        // **退出标记先销、重活后干**（见 session::graceful_exit 的说明）：
+                        // 关机/注销时系统给的时间很短，几何落盘 + 归还几十个文件很可能
+                        // 跑不完就被杀掉。标记留到最后删的话，下次启动会把这次退出判成
+                        // "崩溃"，开机后图标收不回分区。
+                        session::mark_clean_exit();
+                        boxwin::persist_all_geometry(app_handle);
+                        if let Some(db) = app_handle.try_state::<Db>() {
+                            match engine::return_all_to_desktop(&db) {
+                                Ok(n) => log_msg(&format!("退出归还文件：{n} 个")),
+                                Err(e) => {
+                                    log_msg(&format!("return_all_to_desktop failed: {e}"))
+                                }
+                            }
+                            // 轻量通知即可：关机/注销时系统给的时间很短，重路径跑不完反而坏事
+                            shellicon::refresh_desktop_light();
                         }
-                        // 轻量通知即可：关机/注销时系统给的时间很短，重路径跑不完反而坏事
-                        shellicon::refresh_desktop_light();
                     }
                 }
                 _ => {}

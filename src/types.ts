@@ -3,11 +3,13 @@ export interface BoxInfo {
   name: string;
   color: string;
   fileCount: number;
-  boxType: "software" | "file" | "folder";
+  boxType: "software" | "file" | "folder" | "radial";
   linkPath: string | null;
   sortMode: string;
   /** 排序方向：false = 升序，true = 降序 */
   sortDesc: boolean;
+  /** 饼型分区嵌套在哪个分区里（0 = 独立分区） */
+  nestedIn: number;
 }
 
 export interface DesktopFile {
@@ -118,6 +120,18 @@ export interface AppSettings {
   mouseHotkeysEnabled: boolean;
   /** 鼠标快捷键映射表 */
   mouseHotkeys: MouseBinding[];
+  /** 饼型菜单圆钮直径（逻辑像素，40–96，默认 54） */
+  radialBtnSize: number;
+  /** 饼型菜单弹出区直径/宽度基准（逻辑像素，280–720，默认 440） */
+  radialExpandSize: number;
+  /** 饼型弹出文件气泡/卡片的边长（逻辑像素，44–110，默认 66） */
+  radialItemSize: number;
+  /** 饼型弹出文件之间的最小间距（逻辑像素，10–120，默认 28；环半径按周长自动外扩） */
+  radialRingGap: number;
+  /** 饼型菜单标题：空 = 用分区名 */
+  radialTitle: string;
+  /** 饼型菜单图标：图片 data URL 或绝对路径；空 = 不显示图标 */
+  radialIcon: string;
 }
 
 /** 一条鼠标快捷键映射 */
@@ -171,6 +185,18 @@ export interface BoxWindowCfg {
   expandedGeom?: [number, number, number, number] | null;
   /** 悬停胶囊时是否自动临时展开（缺省 true；false = 只能点击展开） */
   capsuleHover?: boolean;
+  /**
+   * 饼型菜单分区样式：undefined/"" = 普通分区；"pie" = 圆形围绕（气泡绕主圆一圈）；
+   * "rect" = 矩形围绕（气泡沿矩形四边一圈，外观不变）；
+   * "grid" = 旧「方形卡片绕圆」，菜单已移除，仅老数据兼容渲染
+   */
+  radialStyle?: string;
+  /** 饼型圆钮是否显示标题文字（缺省 true；图标优先于文字） */
+  radialShowTitle?: boolean;
+  /** 弹出的文件气泡/卡片是否显示文件名（缺省 true；false = 仅图标） */
+  radialShowNames?: boolean;
+  /** 饼型圆钮图标（每分区独立）：图片 data URL 或绝对路径；空 = 用全局默认图标 */
+  radialIcon?: string;
 }
 
 /** 诗词面板窗口位置/外观 */
@@ -235,6 +261,10 @@ export interface IconItem {
   ext: string;
   isDir: boolean;
   icon: string;
+  /** 嵌套饼型分区的条目：真实分区 id（path 是 `box:{id}` 虚拟值，不是文件） */
+  nestedBoxId?: number;
+  /** 嵌套饼型分区自己的颜色（画圆钮底色用） */
+  color?: string;
 }
 
 /**
@@ -242,7 +272,7 @@ export interface IconItem {
  * 菜单只负责“表达意图”，真正的业务逻辑仍留在分区窗口里执行。
  */
 export type BoxMenuAction =
-  | { kind: "create"; boxType: "file" | "folder" }
+  | { kind: "create"; boxType: "file" | "folder" | "radial" }
   | { kind: "newFolder" }
   | { kind: "linkFolder" }
   | { kind: "iconSize"; value: number }
@@ -257,6 +287,16 @@ export type BoxMenuAction =
   | { kind: "expand" }
   /** 胶囊模式：悬停是否自动临时展开 */
   | { kind: "capsuleHover"; value: boolean }
+  /** 饼型菜单分区：切换围绕路径（pie = 圆形围绕 / rect = 矩形按边分组 / line = 直线一排，文件外观不变） */
+  | { kind: "radialStyle"; value: "pie" | "rect" | "line" }
+  /** 饼型菜单分区：圆钮是否显示标题文字（每分区独立） */
+  | { kind: "radialShowTitle"; value: boolean }
+  /** 饼型菜单分区：文件气泡/卡片是否显示文件名（false = 仅图标） */
+  | { kind: "radialShowNames"; value: boolean }
+  /** 饼型菜单分区：设置本分区自己的圆钮图标（空串 = 清除，回退全局默认） */
+  | { kind: "radialIcon"; value: string }
+  /** 饼型菜单分区：打开主设置窗口（自定义图片等在设置页） */
+  | { kind: "openSettings" }
   | { kind: "absorb" }
   | { kind: "organize" }
   | { kind: "delete" };

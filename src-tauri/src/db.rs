@@ -44,6 +44,21 @@ pub struct BoxWindowCfg {
     /// 悬停胶囊时是否自动临时展开（默认 true；false = 只能点击展开）
     #[serde(default = "default_capsule_hover")]
     pub capsule_hover: bool,
+    /// 饼型菜单分区样式："" = 普通分区/胶囊；"pie" = 单击圆钮弹出圆周一圈气泡；
+    /// "grid" = 单击弹出方形网格气泡。radial 分区永远处于收起（圆钮）语义，
+    /// 展开只是临时放大窗口，配置不落盘展开几何。
+    #[serde(default)]
+    pub radial_style: String,
+    /// 饼型圆钮是否显示标题文字（每分区独立开关；图标优先于文字，默认 true）
+    #[serde(default = "default_radial_show_title")]
+    pub radial_show_title: bool,
+    /// 弹出的文件气泡/卡片是否显示文件名（false = 仅图标，默认 true）
+    #[serde(default = "default_radial_show_names")]
+    pub radial_show_names: bool,
+    /// 饼型圆钮图标（每分区独立）：图片 data URL 或绝对路径。
+    /// 空 = 用全局默认图标（app 设置里的 radialIcon）。
+    #[serde(default)]
+    pub radial_icon: String,
     /// 分区归属显示器的硬件身份（显示输出的 PnP 实例路径）。
     /// 空 = 未绑定（老数据 / 从备份恢复），几何完全按 x/y 绝对坐标处理。
     #[serde(default)]
@@ -55,6 +70,14 @@ pub struct BoxWindowCfg {
 }
 
 fn default_capsule_hover() -> bool {
+    true
+}
+
+fn default_radial_show_title() -> bool {
+    true
+}
+
+fn default_radial_show_names() -> bool {
     true
 }
 
@@ -99,6 +122,10 @@ impl BoxWindowCfg {
             collapsed: false,
             expanded_geom: None,
             capsule_hover: true,
+            radial_style: String::new(),
+            radial_show_title: true,
+            radial_show_names: true,
+            radial_icon: String::new(),
             monitor_key: String::new(),
             rel: None,
         }
@@ -623,6 +650,15 @@ impl Db {
         if !cols.iter().any(|c| c == "sort_desc") {
             conn.execute(
                 "ALTER TABLE boxes ADD COLUMN sort_desc INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        // 饼型菜单分区可以嵌进普通文件/软件分区：nested_in = 宿主分区 id（0 = 独立）。
+        // 嵌套后圆钮窗口整体隐藏，只在宿主分区的文件列表里以一个条目出现。
+        if !cols.iter().any(|c| c == "nested_in") {
+            conn.execute(
+                "ALTER TABLE boxes ADD COLUMN nested_in INTEGER NOT NULL DEFAULT 0",
                 [],
             )
             .map_err(|e| e.to_string())?;

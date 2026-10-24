@@ -1,4 +1,4 @@
-﻿use crate::boxwin;
+use crate::boxwin;
 use crate::db::{
     AbsorbCfg, BoxWindowCfg, Db, HuangdiWindowCfg, HuangliWindowCfg, Note, NoteTab, NoteWindowCfg,
     PoetryWindowCfg, ShanghanWindowCfg, StockItem, StockWindowCfg,
@@ -25,6 +25,9 @@ pub struct BoxInfo {
     pub link_path: Option<String>,
     pub sort_mode: String,
     pub sort_desc: bool,
+    /// 饼型分区嵌套在哪个分区里（0 = 独立分区）
+    #[serde(default)]
+    pub nested_in: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -79,6 +82,42 @@ pub struct AppSettings {
     /// 鼠标快捷键映射表（旧设置无该字段时预置中键 → 快速搜索）
     #[serde(default = "default_mouse_hotkeys")]
     pub mouse_hotkeys: Vec<crate::mousehotkey::MouseBinding>,
+    /// 饼型菜单圆钮直径（逻辑像素，40–96，默认 54）
+    #[serde(default = "default_radial_btn_size")]
+    pub radial_btn_size: i32,
+    /// 饼型菜单弹出区直径/宽度基准（逻辑像素，280–720，默认 440）
+    #[serde(default = "default_radial_expand_size")]
+    pub radial_expand_size: i32,
+    /// 饼型弹出文件气泡/卡片的边长（逻辑像素，44–110，默认 66）
+    #[serde(default = "default_radial_item_size")]
+    pub radial_item_size: i32,
+    /// 饼型弹出文件之间的最小间距（逻辑像素，10–120，默认 28）。
+    /// 环半径按「文件数 × (文件尺寸+间距)」的周长需求自动算：
+    /// 文件少时贴近中心、多时自动外扩，任何数量都不会重叠。
+    #[serde(default = "default_radial_ring_gap")]
+    pub radial_ring_gap: i32,
+    /// 饼型菜单标题：空 = 用分区名；非空时圆钮和中心钮都显示它
+    #[serde(default)]
+    pub radial_title: String,
+    /// 饼型菜单图标：图片 data URL 或绝对路径；空 = 不显示图标（显示标题）
+    #[serde(default)]
+    pub radial_icon: String,
+}
+
+fn default_radial_btn_size() -> i32 {
+    54
+}
+
+fn default_radial_expand_size() -> i32 {
+    440
+}
+
+fn default_radial_item_size() -> i32 {
+    66
+}
+
+fn default_radial_ring_gap() -> i32 {
+    28
 }
 
 fn default_mouse_hotkeys() -> Vec<crate::mousehotkey::MouseBinding> {
@@ -166,6 +205,12 @@ impl Default for AppSettings {
             ui_zoom: default_ui_zoom(),
             mouse_hotkeys_enabled: false,
             mouse_hotkeys: default_mouse_hotkeys(),
+            radial_btn_size: default_radial_btn_size(),
+            radial_expand_size: default_radial_expand_size(),
+            radial_item_size: default_radial_item_size(),
+            radial_ring_gap: default_radial_ring_gap(),
+            radial_title: String::new(),
+            radial_icon: String::new(),
         }
     }
 }
@@ -178,6 +223,12 @@ pub struct IconItem {
     pub ext: String,
     pub is_dir: bool,
     pub icon: String,
+    /// 嵌套饼型分区的条目：真实分区 id（path 是 `box:{id}` 虚拟值，不是文件）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nested_box_id: Option<i64>,
+    /// 嵌套饼型分区自己的颜色（画圆钮底色用；普通文件条目无此字段）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 fn count_dir_entries(dir: &Path) -> u64 {
@@ -266,6 +317,7 @@ pub(crate) fn resolve_box_name(db: &Db, requested: &str, box_type: &str) -> Resu
     let fallback = match box_type {
         "folder" => "文件夹",
         "software" => "软件",
+        "radial" => "饼型菜单",
         _ => "文件",
     };
     let prefix: String = requested
@@ -313,7 +365,7 @@ pub fn get_boxes(db: State<Db>) -> Result<Vec<BoxInfo>, String> {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, color, type, link_path, sort_mode, sort_desc FROM boxes ORDER BY id",
+                "SELECT id, name, color, type, link_path, sort_mode, sort_desc, nested_in FROM boxes ORDER BY id",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
@@ -326,6 +378,7 @@ pub fn get_boxes(db: State<Db>) -> Result<Vec<BoxInfo>, String> {
                     r.get::<_, Option<String>>(4)?,
                     r.get::<_, String>(5)?,
                     r.get::<_, i64>(6)? != 0,
+                    r.get::<_, i64>(7)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -338,7 +391,7 @@ pub fn get_boxes(db: State<Db>) -> Result<Vec<BoxInfo>, String> {
     let desktop = engine::desktop_dir()?;
     Ok(list
         .into_iter()
-        .map(|(id, name, color, box_type, link_path, sort_mode, sort_desc)| BoxInfo {
+        .map(|(id, name, color, box_type, link_path, sort_mode, sort_desc, nested_in)| BoxInfo {
             // 快捷访问分区统计的是它链接的那个真实目录，别去数桌面上的同名文件夹
             file_count: if box_type == "folder" {
                 link_path
@@ -355,6 +408,7 @@ pub fn get_boxes(db: State<Db>) -> Result<Vec<BoxInfo>, String> {
             link_path,
             sort_mode,
             sort_desc,
+            nested_in,
         })
         .collect())
 }
@@ -364,7 +418,7 @@ pub fn get_box_by_id(db: State<Db>, id: i64) -> Result<BoxInfo, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let row = conn
         .query_row(
-            "SELECT name, color, type, link_path, sort_mode, sort_desc FROM boxes WHERE id = ?1",
+            "SELECT name, color, type, link_path, sort_mode, sort_desc, nested_in FROM boxes WHERE id = ?1",
             params![id],
             |r| {
                 Ok((
@@ -374,12 +428,13 @@ pub fn get_box_by_id(db: State<Db>, id: i64) -> Result<BoxInfo, String> {
                     r.get::<_, Option<String>>(3)?,
                     r.get::<_, String>(4)?,
                     r.get::<_, i64>(5)? != 0,
+                    r.get::<_, i64>(6)?,
                 ))
             },
         )
         .map_err(|e| e.to_string())?;
     drop(conn);
-    let (name, color, box_type, link_path, sort_mode, sort_desc) = row;
+    let (name, color, box_type, link_path, sort_mode, sort_desc, nested_in) = row;
     let file_count = if box_type == "folder" {
         link_path
             .as_ref()
@@ -398,6 +453,7 @@ pub fn get_box_by_id(db: State<Db>, id: i64) -> Result<BoxInfo, String> {
         link_path,
         sort_mode,
         sort_desc,
+        nested_in,
     })
 }
 
@@ -429,6 +485,42 @@ pub async fn get_box_icons(db: State<'_, Db>, box_id: i64) -> Result<Vec<IconIte
         )
         .map_err(|_| "分区不存在".to_string())?
     };
+    // 饼型圆钮图**每分区独立**（BoxWindowCfg.radial_icon）；分区没设过
+    // （空串）回退全局默认（app 设置 JSON 的 radialIcon 字段）。
+    // **先读 cfg 和设置再锁 conn**：两者内部也要锁 db.conn，持锁期间再调
+    // 它们会同线程死锁（分区全空的事故就是这么来的）。
+    let radial_icon = match db.get_box_window_cfg(box_id) {
+        Ok(Some(cfg)) if !cfg.radial_icon.is_empty() => cfg.radial_icon,
+        _ => db
+            .get_setting("app")
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+            .and_then(|v| {
+                v.get("radialIcon")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_default(),
+    };
+    // 嵌进本分区的饼型菜单（虚拟条目，宿主列表里要显示）
+    let nested_list: Vec<(i64, String, String)> = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id, name, color FROM boxes WHERE nested_in = ?1 AND type = 'radial' ORDER BY id")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![box_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    let _ = box_name;
     // 关联文件夹分区：列它链接的那个文件夹；普通分区：列分区自己的文件夹
     let is_folder = box_type == "folder" && link_path.as_ref().map(|l| !l.is_empty()).unwrap_or(false);
     let (link_path, sort_mode) = if is_folder {
@@ -445,7 +537,7 @@ pub async fn get_box_icons(db: State<'_, Db>, box_id: i64) -> Result<Vec<IconIte
             engine::get_box_files(&box_name, desc)?
         };
         // 统一按 96px 请求图标：分区图标最大可调到 96
-        Ok(files
+        let mut out: Vec<IconItem> = files
             .into_iter()
             .map(|f| IconItem {
                 icon: icons::icon_url(&f.path, 96),
@@ -453,8 +545,25 @@ pub async fn get_box_icons(db: State<'_, Db>, box_id: i64) -> Result<Vec<IconIte
                 path: f.path,
                 ext: f.ext,
                 is_dir: f.is_dir,
+                nested_box_id: None,
+                color: None,
             })
-            .collect::<Vec<_>>())
+            .collect();
+        // 拼上嵌套的饼型菜单条目：path 用 `box:{id}` 虚拟值（绝不与真实文件同名，
+        // 退出归还/搬移等一切按路径操作的逻辑都必须跳过它）。图标复用全局饼型圆钮图，
+        // 颜色用该饼型分区自己的（前端画圆底）。
+        for (nid, nname, ncolor) in nested_list {
+            out.push(IconItem {
+                icon: radial_icon.clone(),
+                name: nname,
+                path: format!("box:{nid}"),
+                ext: "radial".into(),
+                is_dir: false,
+                nested_box_id: Some(nid),
+                color: Some(ncolor),
+            });
+        }
+        Ok(out)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -488,6 +597,17 @@ pub async fn create_box(
     }
     let name = resolve_box_name(&db, &requested, &box_type)?;
     let box_id = insert_box_row(&db, &name, &color, &box_type, link_path.as_deref())?;
+    // 饼型菜单分区：先落一份"圆钮 + 默认样式(pie)"的窗口配置，再建窗。
+    // 建窗逻辑按 radial_style 非空 + collapsed=true 走圆钮尺寸分支。
+    if box_type == "radial" {
+        db.update_box_window_cfg(box_id, |c| {
+            c.radial_style = "pie".into();
+            c.collapsed = true;
+            // 圆钮比默认分区小得多，往屏幕中间挪一点，别贴在 (60,60) 角上
+            c.x = 120;
+            c.y = 120;
+        })?;
+    }
     if box_type != "folder" {
         match engine::ensure_box_dir(&name) {
             Ok(dir) => {
@@ -690,6 +810,9 @@ pub async fn delete_box(
     } else {
         detach_box_dir(&db, &name)?;
     }
+    // 解散宿主前先把里面嵌套的饼型分区全部放回桌面（它们恢复独立，
+    // 否则 nested_in 指向一个已删除的分区，圆钮永远不会再出现）
+    unnest_all_in(&app, &db, id);
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM rules WHERE box_id = ?1", params![id])
@@ -800,6 +923,8 @@ pub fn merge_boxes(
             engine::unhide_dir(&src_dir);
         }
     }
+    // 合并会删掉源分区：先把里面嵌套的饼型分区放回桌面，避免 nested_in 悬空
+    unnest_all_in(&app, &db, src_id);
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM rules WHERE box_id = ?1", params![src_id])
@@ -1436,6 +1561,11 @@ fn import_layout_db(
                 collapsed: false,
                 expanded_geom: None,
                 capsule_hover: true,
+                radial_style: String::new(),
+                radial_show_title: true,
+                radial_show_names: true,
+                // 分区图标不进备份（旧备份结构无此字段）：恢复后回退全局默认
+                radial_icon: String::new(),
                 // 屏幕绑定不进备份：恢复时显示器拓扑可能完全不同，
                 // 带着旧绑定反而会把分区摆到错误的位置
                 monitor_key: String::new(),
@@ -1675,12 +1805,11 @@ pub fn save_settings(app: AppHandle, db: State<Db>, settings: AppSettings) -> Re
             settings.mouse_hotkeys.clone(),
         );
     }
-    // 「分区文件隐藏后缀名」开关变化：广播给所有打开的分区窗口（面板视图）实时生效，
-    // 各窗口收到 settings-changed 后重载设置。只在该开关变化时发，避免拖颜色滑块时
-    // 全部分区窗口跟着空转重载。
-    if prev.hide_file_extensions != settings.hide_file_extensions {
-        let _ = app.emit("settings-changed", settings.hide_file_extensions);
-    }
+    // 设置变化广播：所有打开的分区窗口收到 settings-changed 后重载。
+    // 必须总是发（不能只挑开关）：饼型菜单的图标/圆钮尺寸/弹出尺寸都能在
+    // 右键菜单和设置页里改，圆钮窗口要实时跟着变。高频重载由前端节流兜住
+    //（BoxWindow 对 load() 做 120ms trailing 节流），后端不丢最后一次变更。
+    let _ = app.emit("settings-changed", settings.hide_file_extensions);
     let json = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
     db.set_setting("app", &json)
 }
@@ -1763,6 +1892,11 @@ pub async fn tray_menu_action(app: AppHandle, db: State<'_, Db>, action: String)
         "add" => {
             let name = crate::next_box_name(&db);
             crate::create_box_and_open(&app, &db, &name, "#15b6c9").map(|_| ())
+        }
+        "addRadial" => {
+            // 托盘直达：新建一个饼型菜单分区并立即显示圆钮。
+            // 名字传空 → resolve_box_name 自动取「饼型菜单 N」空号。
+            crate::create_box_and_open_typed(&app, &db, "", "#15b6c9", "radial").map(|_| ())
         }
         "settings" => {
             crate::show_main(&app);
@@ -2050,9 +2184,15 @@ pub fn start_mouse_capture() {
 /// 本来没有这一项（重命名由资源管理器视图自己实现），所以得由前端就地改名；
 /// 其余情况返回 `null`（系统命令已在菜单内部执行完）。
 #[tauri::command]
-pub fn show_file_menu(window: tauri::Window, path: String) -> Result<Option<String>, String> {
+pub fn show_file_menu(app: AppHandle, window: tauri::Window, path: String) -> Result<Option<String>, String> {
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
-    crate::shellmenu::show_context_menu(hwnd, &path)
+    let res = crate::shellmenu::show_context_menu(hwnd, &path);
+    // 菜单期间宿主被临时抬到 TOPMOST 档（见 track_menu_at_cursor），现在归位：
+    // 重新钉回桌面并沉到"桌面之上、其它窗口之下"
+    if let Some(win) = app.get_webview_window(window.label()) {
+        boxwin::sink_desktop_widget(&win, &app);
+    }
+    res
 }
 
 /// 在光标处弹出分区空白处的系统右键菜单（和资源管理器里打开文件夹后在空白处右键一致：
@@ -2068,7 +2208,12 @@ pub fn show_box_background_menu(
     let db = app.state::<Db>().inner().clone();
     let dir = engine::box_dir_for(&db, box_id)?;
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
-    crate::shellmenu::show_folder_background_menu(hwnd, &dir.to_string_lossy())
+    let res = crate::shellmenu::show_folder_background_menu(hwnd, &dir.to_string_lossy());
+    // 同 show_file_menu：菜单期间宿主临时置顶，菜单关闭后沉回桌面层
+    if let Some(win) = app.get_webview_window(window.label()) {
+        boxwin::sink_desktop_widget(&win, &app);
+    }
+    res
 }
 
 /// 就地重命名（同一目录内改名），成功返回新路径。
@@ -2586,6 +2731,316 @@ pub fn start_file_drag(
     // 绝不能刷新 —— 一刷新就会把前端刚调好的图标顺序冲掉。
     notify_box_files_changed(&app);
     Ok(())
+}
+
+/// 饼型分区展开/收起的置顶切换：展开时文件必须浮在其它分区之上才点得到
+/// （TOPMOST + NOACTIVATE，不抢焦点）；收回后归还桌面层。
+#[tauri::command]
+pub fn set_radial_floating(app: AppHandle, window: tauri::Window, float: bool) {
+    if let Some(w) = app.get_webview_window(window.label()) {
+        boxwin::set_radial_floating(&w, float);
+    }
+}
+
+// ---------- 饼型分区嵌套进普通分区 ----------
+
+/// 可嵌套落点的信息（饼型圆钮拖到普通分区上松手时，前端先问一次）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NestTarget {
+    pub id: i64,
+    pub name: String,
+}
+
+/// `nest_scan_cb` 的枚举上下文：受检分区集合（hwnd → id，已排除圆钮自身与
+/// 不可见分区）、光标点、命中的最上层分区。EnumWindows 按 z 序从上到下枚举，
+/// 第一个"矩形包含光标点"的受检分区就是用户眼里的落点，找到即停。
+#[cfg(target_os = "windows")]
+struct NestScanCtx {
+    map: Vec<(isize, i64)>,
+    px: i32,
+    py: i32,
+    found: Option<i64>,
+}
+
+/// 见 [`NestScanCtx`]。返回 FALSE 提前结束枚举（找到了 / 全部扫完没有也要扫完）。
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn nest_scan_cb(
+    hwnd: windows::Win32::Foundation::HWND,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::core::BOOL {
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    let ctx = &mut *(lparam.0 as *mut NestScanCtx);
+    let key = hwnd.0 as isize;
+    let Some(pos) = ctx.map.iter().position(|(k, _)| *k == key) else {
+        return true.into();
+    };
+    let mut rect = windows::Win32::Foundation::RECT::default();
+    if GetWindowRect(hwnd, &mut rect).is_ok() {
+        // 内缩 2px：贴着分区边缘擦过不算，压进去才算
+        if ctx.px >= rect.left + 2
+            && ctx.px < rect.right - 2
+            && ctx.py >= rect.top + 2
+            && ctx.py < rect.bottom - 2
+        {
+            ctx.found = Some(ctx.map[pos].1);
+            return false.into();
+        }
+    }
+    true.into()
+}
+
+/// 光标当前位置下有没有"可以收留饼型分区"的宿主（排除 exclude 自身）。
+/// 只有普通文件 / 软件分区能当宿主，且宿主自己不能也是嵌套的。
+///
+/// **判定必须严格等于"圆钮被压在分区上"（光标点 ∈ 宿主窗口矩形）**：
+/// 曾用"从光标向 8 个方向按圆钮半径外扩探测"绕开 box_at_point 命中自身的问题，
+/// 结果圆钮落在分区**附近**（半个钮身搭到边）也被判成嵌套 —— 用户挪一下圆钮、
+/// 甚至手抖一下（moved 阈值才 2px），圆钮就悄悄钻进旁边的分区"消失"了。
+/// 现在用 EnumWindows 按 z 序找第一个矩形包含光标点的分区窗口（圆钮不在受检
+/// 集合里，不构成遮挡），"指着谁就是谁"的语义与 box_at_point 完全一致。
+#[tauri::command]
+pub fn find_nest_target(app: AppHandle, db: State<Db>, exclude: i64) -> Result<Option<NestTarget>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetCursorPos};
+        // 受检分区：除圆钮自己外的所有**可见**分区窗口（hwnd → id）
+        let bw = app.state::<boxwin::BoxWindows>();
+        let mut map: Vec<(isize, i64)> = Vec::new();
+        for id in bw.ids() {
+            if id == exclude {
+                continue;
+            }
+            let Some(label) = bw.label_for(id) else { continue };
+            let Some(win) = app.get_webview_window(&label) else { continue };
+            if !win.is_visible().unwrap_or(false) {
+                continue;
+            }
+            if let Ok(h) = win.hwnd() {
+                map.push((h.0 as isize, id));
+            }
+        }
+        if map.is_empty() {
+            return Ok(None);
+        }
+        let mut pt = POINT { x: 0, y: 0 };
+        if unsafe { GetCursorPos(&mut pt) }.is_err() {
+            return Ok(None);
+        }
+        let mut ctx = NestScanCtx {
+            map,
+            px: pt.x,
+            py: pt.y,
+            found: None,
+        };
+        unsafe {
+            let _ = EnumWindows(
+                Some(nest_scan_cb),
+                windows::Win32::Foundation::LPARAM(&mut ctx as *mut NestScanCtx as isize),
+            );
+        }
+        let Some(id) = ctx.found else {
+            return Ok(None);
+        };
+        // 校验这个落点能不能当宿主（类型 + 自己没被嵌套）；最上层命中不合格
+        // 就算没有 —— 指着饼型/嵌套分区不往下"穿透"
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let row = conn
+            .query_row(
+                "SELECT name, type, nested_in FROM boxes WHERE id = ?1",
+                rusqlite::params![id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .ok();
+        drop(conn);
+        match row {
+            Some((name, t, nested_in)) if (t == "file" || t == "software") && nested_in == 0 => {
+                Ok(Some(NestTarget { id, name }))
+            }
+            _ => Ok(None),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, db, exclude);
+        Ok(None)
+    }
+}
+
+/// 把饼型分区嵌进宿主分区：写 nested_in 并隐藏圆钮窗口。
+/// 嵌套后它只在宿主的文件列表里以一个条目出现，桌面上不再有圆钮。
+#[tauri::command]
+pub fn nest_radial_box(app: AppHandle, db: State<Db>, box_id: i64, target: i64) -> Result<(), String> {
+    if box_id == target {
+        return Err("不能嵌套进自己".to_string());
+    }
+    // 校验双方类型与状态（同一把锁内读，避免中途变化的竞态）
+    let (b_type, b_nested): (String, i64) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT type, nested_in FROM boxes WHERE id = ?1",
+            params![box_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| "饼型分区不存在".to_string())?
+    };
+    if b_type != "radial" {
+        return Err("只有饼型菜单分区能嵌套".to_string());
+    }
+    if b_nested != 0 {
+        return Err("该饼型分区已嵌套在其他分区里".to_string());
+    }
+    let (t_type, t_nested, t_name): (String, i64, String) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT type, nested_in, name FROM boxes WHERE id = ?1",
+            params![target],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(|_| "目标分区不存在".to_string())?
+    };
+    if t_type != "file" && t_type != "software" {
+        return Err("只能嵌套进普通文件 / 软件分区".to_string());
+    }
+    if t_nested != 0 {
+        return Err("目标分区自身也是嵌套的，不能再收留".to_string());
+    }
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE boxes SET nested_in = ?2 WHERE id = ?1",
+            params![box_id, target],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    // 隐藏圆钮窗口（走"我方主动隐藏"许可路径，防显示桌面免疫把它救回来）
+    boxwin::set_radial_window_hidden(&app, box_id, true)?;
+    crate::log_msg(&format!("饼型分区已嵌套进「{t_name}」"));
+    // 通知宿主分区刷新文件列表（拼出嵌套条目）
+    let bw = app.state::<boxwin::BoxWindows>();
+    if let Some(label) = bw.label_for(target) {
+        let _ = app.emit_to(&label, "box-files-changed", target);
+    }
+    // **必须同时通知饼型分区自己的窗口**：它的 collapseRadial 靠自己状态里的
+    // nestedIn 决定"收回后藏回宿主"。只通知宿主的话，它自己的状态永远是旧的 ——
+    // 解嵌后它仍以为自己是嵌套态，下次收起就把自己藏没了（圆钮凭空消失）。
+    if let Some(label) = bw.label_for(box_id) {
+        let _ = app.emit_to(&label, "box-files-changed", box_id);
+    }
+    Ok(())
+}
+
+/// 把嵌套的饼型分区移出宿主，恢复成桌面上的独立圆钮。
+#[tauri::command]
+pub fn unnest_radial_box(app: AppHandle, db: State<Db>, box_id: i64) -> Result<(), String> {
+    let parent: i64 = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT nested_in FROM boxes WHERE id = ?1",
+            params![box_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| "分区不存在".to_string())?
+    };
+    if parent == 0 {
+        return Ok(());
+    }
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("UPDATE boxes SET nested_in = 0 WHERE id = ?1", params![box_id])
+            .map_err(|e| e.to_string())?;
+    }
+    // 解嵌后必须是"可见的独立分区"：退出落盘可能已把 visible 写成 false
+    let _ = db.update_box_window_cfg(box_id, |c| c.visible = true);
+    // 重新显示圆钮（位置就是嵌套前的那一处，cfg 几何一直没动）
+    boxwin::set_radial_window_hidden(&app, box_id, false)?;
+    crate::log_msg("嵌套的饼型分区已移出到桌面");
+    // 通知原宿主刷新（条目消失）
+    let bw = app.state::<boxwin::BoxWindows>();
+    if let Some(label) = bw.label_for(parent) {
+        let _ = app.emit_to(&label, "box-files-changed", parent);
+    }
+    // 同时通知饼型分区自己的窗口刷新 nestedIn（同 nest_radial_box，防过期状态误隐藏）
+    if let Some(label) = bw.label_for(box_id) {
+        let _ = app.emit_to(&label, "box-files-changed", box_id);
+    }
+    Ok(())
+}
+
+/// 解散宿主分区时，把里面嵌套的饼型分区全部放回桌面（恢复独立）。
+pub(crate) fn unnest_all_in(app: &AppHandle, db: &Db, parent_id: i64) {
+    let children: Vec<i64> = {
+        let conn = match db.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let mut stmt = match conn.prepare("SELECT id FROM boxes WHERE nested_in = ?1") {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let rows = stmt.query_map(params![parent_id], |r| r.get::<_, i64>(0));
+        match rows {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(_) => return,
+        }
+    };
+    for id in children {
+        let _ = db
+            .conn
+            .lock()
+            .map_err(|e| e.to_string())
+            .and_then(|conn| {
+                conn.execute("UPDATE boxes SET nested_in = 0 WHERE id = ?1", params![id])
+                    .map_err(|e| e.to_string())
+            });
+        // 放回桌面后必须是可见的独立分区
+        let _ = db.update_box_window_cfg(id, |c| c.visible = true);
+        let _ = boxwin::set_radial_window_hidden(app, id, false);
+        // 通知自己的窗口刷新 nestedIn（防过期状态把它重新藏没）
+        let bw = app.state::<boxwin::BoxWindows>();
+        if let Some(label) = bw.label_for(id) {
+            let _ = app.emit_to(&label, "box-files-changed", id);
+        }
+        crate::log_msg(&format!("宿主分区解散，饼型分区 #{id} 已放回桌面"));
+    }
+}
+
+/// 打开嵌套的饼型分区（用户点了宿主分区里的圆钮条目）。
+/// `cx/cy` 是条目中心的**物理屏幕坐标**（前端用窗口位置 × 缩放算出来），
+/// 圆钮会出现在那里（夹回屏幕内），弹出后由它自己的前端展开。
+#[tauri::command]
+pub fn show_nested_radial(app: AppHandle, box_id: i64, cx: i32, cy: i32) -> Result<(), String> {
+    boxwin::open_nested_radial(&app, box_id, cx, cy)
+}
+
+/// 嵌套的饼型分区收回圆钮后重新隐藏（回宿主列表里去，而不是留在桌面）。
+///
+/// **以数据库为准**：nested_in = 0（已是独立分区）就直接不动。前端饼型窗口
+/// 自己状态里的 nestedIn 可能过期（刷新事件丢失/时序差），拿过期值调用到这里
+/// 会把一个独立圆钮藏进"永久消失"（hide_win 带许可，守护线程不会救回）——
+/// 这正是"圆钮用着用着就不见了"的根因，后端必须兜底。
+#[tauri::command]
+pub fn hide_nested_radial(app: AppHandle, db: State<Db>, box_id: i64) -> Result<(), String> {
+    let nested: i64 = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT nested_in FROM boxes WHERE id = ?1",
+            params![box_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| "分区不存在".to_string())?
+    };
+    if nested == 0 {
+        return Ok(());
+    }
+    boxwin::set_radial_window_hidden(&app, box_id, true)
 }
 
 // ---------- 便签组件 ----------

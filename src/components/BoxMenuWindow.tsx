@@ -7,8 +7,10 @@ import {
   getBoxById,
   getBoxWindowCfg,
   getSettings,
+  saveSettings,
 } from "../api";
-import type { BoxInfo, BoxWindowCfg } from "../types";
+import type { AppSettings, BoxInfo, BoxWindowCfg } from "../types";
+import { RADIAL_PRESET_ICONS, svgToDataUrl } from "../radialIcons";
 
 const ICON_SIZES = [24, 32, 48, 64, 96];
 const SORT_MODES = [
@@ -30,6 +32,8 @@ export default function BoxMenuWindow({ boxId }: { boxId: number }) {
   const [box, setBox] = useState<BoxInfo | null>(null);
   const [cfg, setCfg] = useState<BoxWindowCfg | null>(null);
   const [bg, setBg] = useState({ color: "#ffffff", opacity: 0 });
+  /** 全局设置（饼型菜单的尺寸/图标是全局参数，菜单里直接改） */
+  const [gset, setGset] = useState<AppSettings | null>(null);
   const [ready, setReady] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   /** 原生取色器会抢焦点导致本窗口失焦，这段时间内别把菜单自动收起来 */
@@ -44,6 +48,7 @@ export default function BoxMenuWindow({ boxId }: { boxId: number }) {
       ]);
       setBox(b);
       setCfg(c);
+      setGset(s);
       setBg({
         color: c?.bgColor || s.boxBgColor || "#ffffff",
         opacity: c?.bgOpacity ?? s.boxBgOpacity ?? 0,
@@ -136,6 +141,211 @@ export default function BoxMenuWindow({ boxId }: { boxId: number }) {
   const isList = cfg?.viewMode === "list";
   const isLocked = cfg?.locked === true;
 
+  // ---------- 饼型菜单专属分支 ----------
+  /** 滑块拖动会产生高频 onChange，trailing 节流 150ms 再落盘 */
+  const gsaveTimer = useRef<number | null>(null);
+  const gsavePending = useRef<AppSettings | null>(null);
+  const saveGset = useCallback((patch: Partial<AppSettings>) => {
+    setGset((g) => {
+      if (!g) return g;
+      const next = { ...g, ...patch };
+      gsavePending.current = next;
+      if (gsaveTimer.current == null) {
+        gsaveTimer.current = window.setTimeout(() => {
+          gsaveTimer.current = null;
+          const p = gsavePending.current;
+          gsavePending.current = null;
+          if (p) saveSettings(p).catch(() => {});
+        }, 150);
+      }
+      return next;
+    });
+  }, []);
+  useEffect(
+    () => () => {
+      if (gsaveTimer.current != null) window.clearTimeout(gsaveTimer.current);
+    },
+    []
+  );
+
+  const isRadialBox = !!cfg?.radialStyle;
+  const showRadialTitle = cfg?.radialShowTitle !== false;
+
+  if (ready && isRadialBox) {
+    const title = gset?.radialTitle?.trim() || box?.name || "饼型菜单";
+    return (
+      <div ref={rootRef} className="box-win-menu box-menu-window">
+        <div className="menu-label">
+          {title}
+          {box?.name && box.name !== title ? ` · ${box.name}` : ""}（{box?.fileCount ?? 0} 个文件）
+        </div>
+
+        <div className="menu-row">
+          <button
+            className={showRadialTitle ? "active" : ""}
+            title="圆钮上显示标题文字（设了图标时图标优先）"
+            onClick={() => {
+              setCfg((c) => (c ? { ...c, radialShowTitle: true } : c));
+              send({ kind: "radialShowTitle", value: true }, false);
+            }}
+          >
+            显示标题
+          </button>
+          <button
+            className={!showRadialTitle ? "active" : ""}
+            title="圆钮上只留图标/纯色圆"
+            onClick={() => {
+              setCfg((c) => (c ? { ...c, radialShowTitle: false } : c));
+              send({ kind: "radialShowTitle", value: false }, false);
+            }}
+          >
+            隐藏标题
+          </button>
+        </div>
+
+        <div className="menu-row">
+          <button
+            className={cfg?.radialStyle === "pie" ? "active" : ""}
+            title="文件气泡绕主圆弹出一圈（圆形围绕）"
+            onClick={() => {
+              setCfg((c) => (c ? { ...c, radialStyle: "pie" } : c));
+              send({ kind: "radialStyle", value: "pie" }, false);
+            }}
+          >
+            圆形围绕
+          </button>
+          <button
+            className={cfg?.radialStyle === "rect" ? "active" : ""}
+            title="文件气泡沿矩形四边绕中心一圈（矩形围绕），文件外观不变"
+            onClick={() => {
+              setCfg((c) => (c ? { ...c, radialStyle: "rect" } : c));
+              send({ kind: "radialStyle", value: "rect" }, false);
+            }}
+          >
+            矩形围绕
+          </button>
+          <button
+            className={cfg?.radialStyle === "line" ? "active" : ""}
+            title="直线排列：单击圆钮，文件在图标朝屏幕空余方向排成一排/一列"
+            onClick={() => {
+              setCfg((c) => (c ? { ...c, radialStyle: "line" } : c));
+              send({ kind: "radialStyle", value: "line" }, false);
+            }}
+          >
+            直线排列
+          </button>
+        </div>
+
+        <div className="menu-row">
+          <button
+            className={cfg?.radialShowNames !== false ? "active" : ""}
+            title="文件气泡/卡片里显示图标 + 文件名"
+            onClick={() => {
+              setCfg((c) => (c ? { ...c, radialShowNames: true } : c));
+              send({ kind: "radialShowNames", value: true }, false);
+            }}
+          >
+            图标+文件名
+          </button>
+          <button
+            className={cfg?.radialShowNames === false ? "active" : ""}
+            title="只显示图标，更紧凑"
+            onClick={() => {
+              setCfg((c) => (c ? { ...c, radialShowNames: false } : c));
+              send({ kind: "radialShowNames", value: false }, false);
+            }}
+          >
+            仅图标
+          </button>
+        </div>
+
+        <div className="menu-label">圆钮尺寸</div>
+        <div className="menu-bgrow">
+          <input
+            type="range"
+            min={40}
+            max={96}
+            step={2}
+            value={gset?.radialBtnSize ?? 54}
+            onChange={(e) => saveGset({ radialBtnSize: Number(e.target.value) })}
+          />
+          <span className="menu-bgval">{gset?.radialBtnSize ?? 54}px</span>
+        </div>
+
+        <div className="menu-label">文件间距</div>
+        <div className="menu-bgrow">
+          <input
+            type="range"
+            min={10}
+            max={120}
+            step={2}
+            value={gset?.radialRingGap ?? 28}
+            onChange={(e) => saveGset({ radialRingGap: Number(e.target.value) })}
+          />
+          <span className="menu-bgval">{gset?.radialRingGap ?? 28}px</span>
+        </div>
+
+        <div className="menu-label">文件尺寸</div>
+        <div className="menu-bgrow">
+          <input
+            type="range"
+            min={44}
+            max={110}
+            step={2}
+            value={gset?.radialItemSize ?? 66}
+            onChange={(e) => saveGset({ radialItemSize: Number(e.target.value) })}
+          />
+          <span className="menu-bgval">{gset?.radialItemSize ?? 66}px</span>
+        </div>
+
+        <div className="menu-label">图标（点击套用，只对本分区生效）</div>
+        <div className="radial-preset-grid radial-preset-grid--menu">
+          {RADIAL_PRESET_ICONS.map((p) => {
+            const url = svgToDataUrl(p.svg);
+            // 当前生效图标 = 分区自己的，没设过回退全局默认
+            const effIcon = cfg?.radialIcon ?? gset?.radialIcon ?? "";
+            const active = effIcon === url;
+            return (
+              <button
+                key={p.key}
+                className={`radial-preset-item ${active ? "active" : ""}`}
+                title={p.label}
+                onClick={() => {
+                  setCfg((c) => (c ? { ...c, radialIcon: url } : c));
+                  send({ kind: "radialIcon", value: url }, false);
+                }}
+              >
+                <img src={url} alt={p.label} draggable={false} />
+              </button>
+            );
+          })}
+        </div>
+        <div className="menu-row">
+          <button
+            title="清除本分区图标，回退全局默认"
+            onClick={() => {
+              setCfg((c) => (c ? { ...c, radialIcon: "" } : c));
+              send({ kind: "radialIcon", value: "" }, false);
+            }}
+          >
+            清除图标
+          </button>
+          <button title="自定义图片请到 设置 → 饼型菜单" onClick={() => send({ kind: "openSettings" })}>
+            更多设置…
+          </button>
+        </div>
+
+        <button
+          className="menu-danger"
+          title="解散分区：文件按原来的位置退回，不会被删除"
+          onClick={() => send({ kind: "delete" })}
+        >
+          解散分区
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div ref={rootRef} className="box-win-menu box-menu-window">
       <div className="menu-label">新建分区</div>
@@ -149,6 +359,12 @@ export default function BoxMenuWindow({ boxId }: { boxId: number }) {
         </button>
         <button title="新建一个关联到某个文件夹的分区" onClick={() => send({ kind: "newFolder" })}>
           文件夹
+        </button>
+        <button
+          title="新建饼型菜单：桌面上一颗小圆钮，单击气泡式弹出文件圈"
+          onClick={() => send({ kind: "create", boxType: "radial" })}
+        >
+          饼型菜单
         </button>
       </div>
 
@@ -173,30 +389,32 @@ export default function BoxMenuWindow({ boxId }: { boxId: number }) {
         >
           锁定
         </button>
-        {cfg?.collapsed ? (
-          <button
-            title="展开：恢复收起前的大小和位置"
-            onClick={() => {
-              setCfg((c) => (c ? { ...c, collapsed: false } : c));
-              send({ kind: "expand" }, false);
-            }}
-          >
-            展开
-          </button>
-        ) : (
-          <button
-            title="收起为胶囊：点击或悬停可再展开"
-            onClick={() => {
-              setCfg((c) => (c ? { ...c, collapsed: true } : c));
-              send({ kind: "collapse" }, false);
-            }}
-          >
-            收起
-          </button>
-        )}
+        {/* 饼型菜单分区永远是圆钮语义，没有收起/展开 */}
+        {!cfg?.radialStyle &&
+          (cfg?.collapsed ? (
+            <button
+              title="展开：恢复收起前的大小和位置"
+              onClick={() => {
+                setCfg((c) => (c ? { ...c, collapsed: false } : c));
+                send({ kind: "expand" }, false);
+              }}
+            >
+              展开
+            </button>
+          ) : (
+            <button
+              title="收起为胶囊：点击或悬停可再展开"
+              onClick={() => {
+                setCfg((c) => (c ? { ...c, collapsed: true } : c));
+                send({ kind: "collapse" }, false);
+              }}
+            >
+              收起
+            </button>
+          ))}
       </div>
       {/* 胶囊模式下才需要"悬停展开"这个开关：普通分区悬停没有展开行为 */}
-      {cfg?.collapsed ? (
+      {cfg?.collapsed && !cfg?.radialStyle ? (
         <div className="menu-row">
           <button
             className={cfg?.capsuleHover === false ? "" : "active"}
@@ -210,13 +428,49 @@ export default function BoxMenuWindow({ boxId }: { boxId: number }) {
           </button>
           <button
             className={cfg?.capsuleHover === false ? "active" : ""}
-            title="开（默认）：鼠标悬停胶囊 0.5 秒自动临时展开，移开后收起"
+            title="开（默认）：鼠标悬停胶囊自动临时展开，移开后收起"
             onClick={() => {
               setCfg((c) => (c ? { ...c, capsuleHover: true } : c));
               send({ kind: "capsuleHover", value: true }, false);
             }}
           >
             悬停展开
+          </button>
+        </div>
+      ) : null}
+
+      {/* 饼型菜单分区：切换围绕路径（圆形一圈 / 矩形四边一圈），文件外观不变 */}
+      {cfg?.radialStyle ? (
+        <div className="menu-row">
+          <button
+            className={cfg.radialStyle === "pie" ? "active" : ""}
+            title="圆形围绕：单击圆钮，文件气泡绕主圆一圈"
+            onClick={() => {
+              setCfg((c) => (c ? { ...c, radialStyle: "pie" } : c));
+              send({ kind: "radialStyle", value: "pie" }, false);
+            }}
+          >
+            圆形围绕
+          </button>
+          <button
+            className={cfg.radialStyle === "rect" ? "active" : ""}
+            title="矩形围绕：单击圆钮，文件气泡沿矩形四边绕中心一圈"
+            onClick={() => {
+              setCfg((c) => (c ? { ...c, radialStyle: "rect" } : c));
+              send({ kind: "radialStyle", value: "rect" }, false);
+            }}
+          >
+            矩形围绕
+          </button>
+          <button
+            className={cfg.radialStyle === "line" ? "active" : ""}
+            title="直线排列：单击圆钮，文件在图标朝屏幕空余方向排成一排/一列"
+            onClick={() => {
+              setCfg((c) => (c ? { ...c, radialStyle: "line" } : c));
+              send({ kind: "radialStyle", value: "line" }, false);
+            }}
+          >
+            直线排列
           </button>
         </div>
       ) : null}

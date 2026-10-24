@@ -83,15 +83,21 @@ function UndoOrganizeRow({
 
 const APP_VERSION = "V1.3-2026-10-15";
 
-type TabKey = "basic" | "search" | "widgets" | "hotkeys" | "about";
+type TabKey = "basic" | "search" | "radial" | "widgets" | "hotkeys" | "about";
 
 const TABS: { key: TabKey; label: string; hint: string }[] = [
   { key: "basic", label: "常规设置", hint: "外观 / 系统（布局备份在左下角）" },
   { key: "search", label: "搜索", hint: "索引范围 / 文件类型类目" },
+  { key: "radial", label: "饼型菜单", hint: "圆钮尺寸 / 弹出尺寸 / 标题 / 图标" },
   { key: "widgets", label: "桌面组件", hint: "便签 / 股票 / 黄历 / 诗词 / 黄帝内经 / 伤寒论" },
   { key: "hotkeys", label: "鼠标快捷键", hint: "鼠标侧键 / 中键 → 功能" },
   { key: "about", label: "关于", hint: "版本与介绍" },
 ];
+
+/**
+ * 饼型菜单内置图标：与饼型右键菜单共用一份（src/radialIcons.ts）。
+ */
+import { RADIAL_PRESET_ICONS, svgToDataUrl } from "../radialIcons";
 
 // ---------- 鼠标快捷键 ----------
 
@@ -174,6 +180,12 @@ export default function SettingsView({ notify, refreshKey }: SettingsViewProps) 
     uiZoom: 1,
     mouseHotkeysEnabled: false,
     mouseHotkeys: [],
+    radialBtnSize: 54,
+    radialExpandSize: 440,
+    radialItemSize: 66,
+    radialRingGap: 28,
+    radialTitle: "",
+    radialIcon: "",
   });
   const [tab, setTab] = useState<TabKey>("basic");
 
@@ -1010,6 +1022,183 @@ export default function SettingsView({ notify, refreshKey }: SettingsViewProps) 
                 </td>
                 </tr>
                 </tbody>
+      </table>
+      </>
+      )}
+
+      {tab === "radial" && (
+      <>
+      <table className="data-table">
+        <tbody>
+          <tr>
+            <td>圆钮尺寸</td>
+            <td>
+              <input
+                type="range"
+                min={40}
+                max={96}
+                step={2}
+                value={settings.radialBtnSize}
+                onChange={(e) =>
+                  doLiveSettings({ ...settings, radialBtnSize: Number(e.target.value) })
+                }
+                style={{ verticalAlign: "middle", marginRight: 8, width: 180 }}
+              />
+              {settings.radialBtnSize} px
+              <span style={{ fontSize: 12, color: "var(--text-sub)", marginLeft: 8 }}>
+                桌面上圆钮的直径，改动实时生效
+              </span>
+            </td>
+          </tr>
+          <tr>
+            <td>文件尺寸</td>
+            <td>
+              <input
+                type="range"
+                min={44}
+                max={110}
+                step={2}
+                value={settings.radialItemSize}
+                onChange={(e) =>
+                  doLiveSettings({ ...settings, radialItemSize: Number(e.target.value) })
+                }
+                style={{ verticalAlign: "middle", marginRight: 8, width: 180 }}
+              />
+              {settings.radialItemSize} px
+              <span style={{ fontSize: 12, color: "var(--text-sub)", marginLeft: 8 }}>
+                弹出的气泡/方形卡片的边长
+              </span>
+            </td>
+          </tr>
+          <tr>
+            <td>文件间距</td>
+            <td>
+              <input
+                type="range"
+                min={10}
+                max={120}
+                step={2}
+                value={settings.radialRingGap}
+                onChange={(e) =>
+                  doLiveSettings({ ...settings, radialRingGap: Number(e.target.value) })
+                }
+                style={{ verticalAlign: "middle", marginRight: 8, width: 180 }}
+              />
+              {settings.radialRingGap} px
+              <span style={{ fontSize: 12, color: "var(--text-sub)", marginLeft: 8 }}>
+                文件之间的最小间距，环半径随文件数量自动外扩
+              </span>
+            </td>
+          </tr>
+          <tr>
+            <td>饼型标题</td>
+            <td>
+              <input
+                type="text"
+                className="text-input"
+                value={settings.radialTitle}
+                placeholder="留空 = 显示分区名"
+                onChange={(e) =>
+                  doLiveSettings({ ...settings, radialTitle: e.target.value })
+                }
+                style={{ width: 200 }}
+              />
+              <span style={{ fontSize: 12, color: "var(--text-sub)", marginLeft: 8 }}>
+                圆钮与弹出中心显示的文字，完整显示不截断
+              </span>
+            </td>
+          </tr>
+          <tr>
+            <td style={{ verticalAlign: "top", paddingTop: 14 }}>内置图标</td>
+            <td>
+              <div className="radial-preset-grid">
+                {RADIAL_PRESET_ICONS.map((p) => {
+                  const url = svgToDataUrl(p.svg);
+                  const active = settings.radialIcon === url;
+                  return (
+                    <button
+                      key={p.key}
+                      className={`radial-preset-item ${active ? "active" : ""}`}
+                      title={p.label}
+                      onClick={() => doLiveSettings({ ...settings, radialIcon: url })}
+                    >
+                      <img src={url} alt={p.label} draggable={false} />
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ fontSize: 12, color: "var(--text-sub)", marginTop: 6 }}>
+                这是**默认图标**：给没单独设置图标的饼型分区用；每个饼型分区可在
+                右键菜单里单独设置自己的图标（分区图标优先于这里的默认）
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td>自定义图标</td>
+            <td>
+              {settings.radialIcon ? (
+                <img
+                  src={settings.radialIcon}
+                  alt=""
+                  style={{
+                    width: 28,
+                    height: 28,
+                    borderRadius: "50%",
+                    background: "#fff",
+                    objectFit: "contain",
+                    verticalAlign: "middle",
+                    marginRight: 8,
+                  }}
+                />
+              ) : null}
+              <label className="btn small" style={{ cursor: "pointer" }}>
+                选择图片
+                <input
+                  type="file"
+                  accept="image/*"
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = "";
+                    if (!f) return;
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                      const img = new Image();
+                      img.onload = () => {
+                        // 压到 128×128 再存：设置 JSON 不至于被一张原图撑爆
+                        const c = document.createElement("canvas");
+                        c.width = 128;
+                        c.height = 128;
+                        const ctx = c.getContext("2d");
+                        if (!ctx) return;
+                        const k = Math.min(128 / img.width, 128 / img.height);
+                        ctx.drawImage(
+                          img,
+                          (128 - img.width * k) / 2,
+                          (128 - img.height * k) / 2,
+                          img.width * k,
+                          img.height * k
+                        );
+                        doLiveSettings({ ...settings, radialIcon: c.toDataURL("image/png") });
+                      };
+                      img.src = String(reader.result);
+                    };
+                    reader.readAsDataURL(f);
+                  }}
+                />
+              </label>
+              {settings.radialIcon ? (
+                <button
+                  className="btn small"
+                  style={{ marginLeft: 8 }}
+                  onClick={() => doLiveSettings({ ...settings, radialIcon: "" })}
+                >
+                  清除图标
+                </button>
+              ) : null}
+            </td>
+          </tr>
+        </tbody>
       </table>
       </>
       )}

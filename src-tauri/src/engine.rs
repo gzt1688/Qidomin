@@ -1,4 +1,4 @@
-﻿use crate::db::Db;
+use crate::db::Db;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -978,6 +978,7 @@ pub fn return_all_to_desktop(db: &Db) -> Result<u32, String> {
     let mut moved = 0u32;
 
     // 1) 有记录的：回到整理前的原始位置
+    let mut attempted: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for (_id, _name, from, to) in db.get_move_history()? {
         let src = Path::new(&to);
         if !src.exists() {
@@ -990,9 +991,23 @@ pub fn return_all_to_desktop(db: &Db) -> Result<u32, String> {
         // 归还目标统一由 return_target_for 决定：原始位置不可用时回桌面根目录，
         // 绝不能是另一个分区的隐藏文件夹。
         let target = return_target_for(db, &desktop, src, &from);
-        if transfer_to_exact(src, &target).is_ok() {
-            moved += 1;
+        match transfer_to_exact(src, &target) {
+            Ok(_) => moved += 1,
+            Err(e) => {
+                // 静默吞掉的话，"程序正在运行导致没退回去"这种事用户完全无感，
+                // 只能看着桌面上多出副本干着急
+                crate::log_msg(&format!(
+                    "归还失败：{} → {}（{e}）",
+                    src.display(),
+                    target.display()
+                ));
+            }
         }
+        // 记下"第一段已尝试过"的源：第二段绝不能对它们换名重试——
+        // 失败原因（典型：exe 正在运行删不掉）换个目标名不会消失，
+        // 换名成功反而会在桌面留下「xxx (2).exe」并把新名字写进历史，
+        // 每轮退出都多一个副本
+        attempted.insert(src.to_path_buf());
     }
 
     // 2) 没有记录的（历史被清过、或用户直接往分区文件夹里塞的）→ 退到桌面，
@@ -1012,6 +1027,11 @@ pub fn return_all_to_desktop(db: &Db) -> Result<u32, String> {
                 if fname.eq_ignore_ascii_case("desktop.ini") {
                     return None;
                 }
+                // 第一段刚尝试失败（有记录但被占用）的文件跳过：
+                // 留在分区里，等程序关闭后的下一轮自然归还
+                if attempted.contains(&p) {
+                    return None;
+                }
                 let is_dir = p.is_dir();
                 Some((fname, p, is_dir))
             })
@@ -1020,9 +1040,16 @@ pub fn return_all_to_desktop(db: &Db) -> Result<u32, String> {
             // 文件夹也要一起退回去：以前直接跳过目录，删分区后它会永远留在
             // 隐藏的分区文件夹里，既看不见也删不掉（remove_dir 还会因非空失败）
             let target = unique_target_kind(&desktop, &fname, is_dir);
-            if transfer_to_exact(&p, &target).is_ok() {
-                db.record_move(&fname, &target.to_string_lossy(), &p.to_string_lossy());
-                moved += 1;
+            match transfer_to_exact(&p, &target) {
+                Ok(_) => {
+                    db.record_move(&fname, &target.to_string_lossy(), &p.to_string_lossy());
+                    moved += 1;
+                }
+                Err(e) => crate::log_msg(&format!(
+                    "归还失败：{} → {}（{e}）",
+                    p.display(),
+                    target.display()
+                )),
             }
         }
         // 空了才删；没退干净就留着（下次启动还能接着收），绝不留一个用户看不见的
@@ -1081,8 +1108,17 @@ pub fn reorganize_from_history(db: &Db) -> Result<u32, String> {
         // （桌面在 C:、文件在 D:/E:/U 盘）时，rename 会抛"跨设备"错误并在此
         // 被静默吞掉，结果退出归还成功、启动收回却失败，文件永远回不了分区。
         // transfer_to_exact 会自动降级成"复制 + 删源"，与拖入/退出归还同口径。
-        if transfer_to_exact(src, dst).is_ok() {
-            moved += 1;
+        match transfer_to_exact(src, dst) {
+            Ok(_) => moved += 1,
+            Err(e) => {
+                // 典型：收一个正在运行的 exe（重命名被映像锁拒绝）。不报出来用户
+                // 只会看到"程序没收回分区"却不知道为什么
+                crate::log_msg(&format!(
+                    "启动收回失败：{} → {}（{e}）",
+                    src.display(),
+                    dst.display()
+                ));
+            }
         }
     }
     Ok(moved)
@@ -1090,6 +1126,11 @@ pub fn reorganize_from_history(db: &Db) -> Result<u32, String> {
 
 /// 把 `src` 移动到**精确路径** `dst`（不做重名去重，调用方自己保证目标不冲突）。
 /// 跨盘同样会自动退化成"复制 + 删源"。
+///
+/// 复制 + 删源**失败必须回滚**：源文件正在运行（映像锁禁止删除）、被杀软锁定等
+/// 都会让"复制成功、删源失败"——不回滚的话目标处就残留一份副本，源还在原处，
+/// 之后每轮归还都会因原位置被占而换名再复制一份（表现为"每退出重启一次桌面
+/// 就多出一个程序"）。
 pub fn transfer_to_exact(src: &Path, dst: &Path) -> Result<(), String> {
     if dst.exists() {
         return Err(format!("{} 已存在", dst.display()));
@@ -1103,10 +1144,18 @@ pub fn transfer_to_exact(src: &Path, dst: &Path) -> Result<(), String> {
         Err(e) if is_cross_device(&e) => {
             if is_dir {
                 copy_dir_all(src, dst)?;
-                fs::remove_dir_all(src).map_err(|re| format!("原目录删除失败：{re}"))?;
+                if let Err(re) = fs::remove_dir_all(src) {
+                    // 删不掉源（占用）→ 撤销刚复制出来的整个目录，当作没搬过
+                    let _ = fs::remove_dir_all(dst);
+                    return Err(format!("原目录删除失败（已回滚副本）：{re}"));
+                }
             } else {
                 fs::copy(src, dst).map_err(|ce| format!("复制失败：{ce}"))?;
-                fs::remove_file(src).map_err(|re| format!("原文件删除失败：{re}"))?;
+                if let Err(re) = fs::remove_file(src) {
+                    // 源删不掉（典型：exe 正在运行，映像锁禁止删除）→ 撤销副本
+                    let _ = fs::remove_file(dst);
+                    return Err(format!("原文件删除失败（已回滚副本）：{re}"));
+                }
             }
             Ok(())
         }

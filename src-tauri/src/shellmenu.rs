@@ -212,9 +212,33 @@ fn create_new_item(dir: &str, is_folder: bool) -> Result<(), String> {
 }
 
 /// 在屏幕光标处弹出 `menu`，返回被选中的菜单项 id（0 = 取消）。
+///
+/// z 序处理：分区窗口平时钉在桌面层（z 序最低档），而 `TrackPopupMenuEx`
+/// 弹出的菜单跟着宿主的档位走 —— 撞上展开的饼型文件（TOPMOST 档）就被盖住，
+/// 表现为「右键菜单一会在上、一会文件在上」。这里先把宿主临时抬到 TOPMOST 档
+/// （菜单随宿主出现在最上层），菜单关闭后按原样放回（由命令层的沉底逻辑归位）。
 unsafe fn track_menu_at_cursor(menu: windows::Win32::UI::WindowsAndMessaging::HMENU, hwnd: HWND) -> usize {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOPMOST,
+    };
     let mut pt = POINT { x: 0, y: 0 };
     let _ = GetCursorPos(&mut pt);
+    // 只在宿主本来不是置顶时才动它：展开中的饼型窗口自己就是 TOPMOST，
+    // 菜单关了不能顺手把人家的置顶摘掉
+    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+    let was_topmost = ex & WS_EX_TOPMOST.0 != 0;
+    if !was_topmost {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
     // TPM_RETURNCMD：菜单不给我们发命令消息，而是把选中的 id 直接当返回值返回，
     // 这样不用额外挂消息钩子 / 跑消息循环。
     let picked = TrackPopupMenuEx(
@@ -225,6 +249,17 @@ unsafe fn track_menu_at_cursor(menu: windows::Win32::UI::WindowsAndMessaging::HM
         hwnd,
         None,
     );
+    if !was_topmost {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_NOTOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
     picked.0 as usize
 }
 

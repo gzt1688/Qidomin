@@ -31,7 +31,10 @@ export default function PanelView({ refreshKey, notify }: PanelViewProps) {
           setHideFileExtensions(s.hideFileExtensions === true);
         })
         .catch(() => {});
-      setBoxes(list);
+      setBoxes(
+        // 嵌套在别的分区里的饼型菜单不单独列出：它已经是宿主分区里的一个条目
+        list.filter((b) => !(b.boxType === "radial" && b.nestedIn))
+      );
       const filesMap: Record<number, DesktopFile[]> = {};
       for (const box of list) {
         filesMap[box.id] = await getBoxFiles(box.name);

@@ -312,8 +312,9 @@ unsafe extern "system" fn no_minimize_subclass(
     use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows::Win32::UI::Shell::DefSubclassProc;
     use windows::Win32::UI::WindowsAndMessaging::{
-        IsIconic, IsWindowVisible, KillTimer, PostMessageW, SetTimer, ShowWindow,
-        SET_WINDOW_POS_FLAGS, SWP_HIDEWINDOW, SW_SHOWNOACTIVATE, WINDOWPOS, HWND_BOTTOM,
+        GetWindowLongPtrW, IsIconic, IsWindowVisible, KillTimer, PostMessageW, SetTimer,
+        ShowWindow, GWL_EXSTYLE, SET_WINDOW_POS_FLAGS, SWP_HIDEWINDOW, SW_SHOWNOACTIVATE,
+        WINDOWPOS, HWND_BOTTOM, WS_EX_NOACTIVATE,
     };
 
     const WM_SIZE: u32 = 0x0005;
@@ -321,6 +322,9 @@ unsafe extern "system" fn no_minimize_subclass(
     const WM_SHOWWINDOW: u32 = 0x0018;
     const WM_WINDOWPOSCHANGING: u32 = 0x0046;
     const WM_TIMER: u32 = 0x0113;
+    // WM_MOUSEACTIVATE：鼠标点击时系统来问"要不要因此激活窗口"
+    const WM_MOUSEACTIVATE: u32 = 0x0021;
+    const MA_NOACTIVATE: usize = 3;
     // WM_APP+1：隐藏完成后补一次显示的兜底消息
     const WM_APP_RESHOW: u32 = 0x8001;
     // 补显示之后再核一次的定时器（外壳可能在补显示之后才真正把窗口藏掉）
@@ -339,6 +343,16 @@ unsafe extern "system" fn no_minimize_subclass(
             ));
         }
         return LRESULT(0);
+    }
+    // 0.05) 带 WS_EX_NOACTIVATE 的分区窗口：点击不激活、不置顶，鼠标消息照常送达。
+    //       这是「点击分区 → 全部分区闪一下 / 双击没反应」的根修（配合
+    //       apply_show_desktop_immune 里打的样式标志）。显式返回比依赖系统
+    //       对该样式的默认处理更可靠（WebView2 宿主链上的激活路径各版本有差异）。
+    if msg == WM_MOUSEACTIVATE {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as isize;
+        if ex & (WS_EX_NOACTIVATE.0 as isize) != 0 {
+            return LRESULT(MA_NOACTIVATE as isize);
+        }
     }
     // 0.1) 窗口重新显示 → 撤销「我方主动隐藏」许可，恢复显示桌面免疫
     if msg == WM_SHOWWINDOW && wparam.0 != 0 {
@@ -532,6 +546,25 @@ static KEEPER_SCAN: LazyLock<Mutex<Vec<(isize, u8)>>> =
 /// 守护线程的唤醒句柄（`SetEvent` 即催一次核验）；0 表示尚未创建。
 #[cfg(target_os = "windows")]
 static KEEPER_KICK: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// 退出时置位：守护线程看到后立即停止一切窗口操作。
+///
+/// 退出阶段窗口在逐个销毁，守护线程若还在对它们做跨线程 `SetWindowPos` /
+/// `ShowWindow` / `EnumWindows`，这些调用要靠向主线程发消息来完成——主线程
+/// 正埋头销毁 WebView 时就形成互相等待（SendMessage 互锁），表现为
+/// 「图标都回桌面了、窗口也该关了，程序就是不肯退」。退出前必须叫停。
+#[cfg(target_os = "windows")]
+static KEEPER_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 通知桌面守护线程停止（退出流程专用，幂等）。
+#[cfg(target_os = "windows")]
+pub fn stop_desktop_keeper() {
+    KEEPER_STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 非 Windows 平台无守护线程，空实现保持调用方简单。
+#[cfg(not(target_os = "windows"))]
+pub fn stop_desktop_keeper() {}
 
 /// 高频核验窗口的截止时刻（相对 [`EPOCH`] 的毫秒数）。
 #[cfg(target_os = "windows")]
@@ -785,6 +818,11 @@ unsafe fn desktop_keeper_tick() {
         SWP_NOOWNERZORDER, SWP_NOSENDCHANGING, SWP_NOSIZE, SW_SHOWNOACTIVATE,
     };
 
+    // 退出流程已叫停：窗口正在销毁，此时任何跨线程窗口操作都有互锁卡死风险
+    if KEEPER_STOP.load(Ordering::Relaxed) {
+        return;
+    }
+
     let targets: std::collections::HashSet<isize> = SUBCLASSED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -841,6 +879,12 @@ unsafe fn desktop_keeper_tick() {
             skipped_hidden += 1;
             continue;
         }
+        // 展开中的饼型分区是**故意置顶**的（文件要浮在其它窗口之上可点），
+        // 守护别把它拽回桌面组，也别把它算进"最上层受保护窗口"；
+        // 收回时会自己沉回桌面层。
+        if is_topmost(hwnd) {
+            continue;
+        }
         if first_prot.is_none() {
             first_prot = Some(i);
         }
@@ -874,7 +918,7 @@ unsafe fn desktop_keeper_tick() {
                     continue;
                 }
                 let hwnd = HWND(*key as *mut std::ffi::c_void);
-                if is_user_hidden(hwnd) || need_z.contains(&hwnd) {
+                if is_user_hidden(hwnd) || is_topmost(hwnd) || need_z.contains(&hwnd) {
                     continue;
                 }
                 need_z.push(hwnd);
@@ -1088,11 +1132,27 @@ pub fn apply_show_desktop_immune(win: &WebviewWindow, keep: bool) {
         use windows::Win32::UI::WindowsAndMessaging::{
             GetWindowLongPtrW, SetWindowLongPtrW, GWL_STYLE, GWL_EXSTYLE, WS_CHILD, WS_POPUP,
             WS_MINIMIZEBOX,
-            WS_EX_LAYERED, SetParent, SetWindowPos, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE,
-            SWP_NOACTIVATE,
+            WS_EX_LAYERED, WS_EX_NOACTIVATE, SetParent, SetWindowPos, SWP_FRAMECHANGED, SWP_NOMOVE,
+            SWP_NOSIZE, SWP_NOACTIVATE,
         };
         if let Ok(hwnd) = win.hwnd() {
             unsafe {
+                // 分区窗口（box-*）设为「点击不激活」：点击只把鼠标消息交给 WebView2，
+                // 不激活窗口、不把它抬到最顶层。否则每一下点击都会走
+                // 「激活→升顶→焦点事件触发 sink_desktop_widget 整体沉回」，
+                // 表现为所有分区闪一下、双击打开的第一下被打断（点开没反应）。
+                // 需要键盘输入时（改名 / 分区内搜索）由前端显式 setFocus 申请。
+                // 其余桌面组件（便签等）有"点进去就打字"的输入框，保持原行为。
+                let no_activate = keep && win.label().starts_with("box-");
+                let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as isize;
+                let new_ex = if no_activate {
+                    ex | (WS_EX_NOACTIVATE.0 as isize)
+                } else {
+                    ex & !(WS_EX_NOACTIVATE.0 as isize)
+                };
+                if new_ex != ex {
+                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex as _);
+                }
                 if keep {
                     // 统一走「顶层窗口 + 防最小化」方案（全系统版本一致）。
                     //
@@ -1297,6 +1357,70 @@ pub fn sink_to_desktop_level(win: &WebviewWindow) {
         }
     }
     let _ = win;
+}
+
+/// 窗口是否带 WS_EX_TOPMOST（展开中的饼型分区悬浮标记）。
+/// 守护线程据此豁免：展开置顶是故意为之，不能被拽回桌面组。
+#[cfg(target_os = "windows")]
+fn is_topmost(hwnd: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TOPMOST};
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as isize;
+        ex & (WS_EX_TOPMOST.0 as isize) != 0
+    }
+}
+
+/// 饼型分区展开态的「悬浮」：展开的文件必须浮在其它分区/窗口之上才点得到，
+/// 展开瞬间把窗口抬到 TOPMOST（NOACTIVATE，不抢焦点、不触发沉回链）；
+/// 收回时去掉置顶并归还桌面层，继续当安静的桌面挂件。
+pub fn set_radial_floating(win: &WebviewWindow, float: bool) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, GWL_STYLE, SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE,
+            SWP_NOMOVE, SWP_NOSIZE, WS_CHILD,
+        };
+        if let Ok(hwnd) = win.hwnd() {
+            unsafe {
+                // 「显示桌面免疫」会把分区挂成桌面子窗口：**子窗口没有 TOPMOST
+                // band**，置顶无效、z 序只在桌面内部比较——展开文件会被同为
+                // 子窗口的其它分区盖住（实测根因）。展开前必须先摘回顶层。
+                let is_child = GetWindowLongPtrW(hwnd, GWL_STYLE) & (WS_CHILD.0 as isize) != 0;
+                let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+                if float {
+                    if is_child {
+                        detach_from_desktop(win);
+                    }
+                    let ok = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags).is_ok();
+                    // 置顶链路留痕：float / 挂载中 / SetWindowPos 结果，排查"没在顶层"用
+                    crate::log_msg(&format!(
+                        "radial-float: on label={} wasChild={is_child} setpos_ok={ok}",
+                        win.label()
+                    ));
+                } else {
+                    let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
+                    sink_to_desktop_level(win);
+                    // 原本挂着显示桌面免疫的分区：收回展开后挂回桌面，免疫不丢
+                    if is_child {
+                        let keep = win
+                            .app_handle()
+                            .state::<Db>()
+                            .get_setting("app")
+                            .ok()
+                            .flatten()
+                            .and_then(|s| serde_json::from_str::<crate::commands::AppSettings>(&s).ok())
+                            .map(|x| x.keep_on_show_desktop)
+                            .unwrap_or(true);
+                        if keep {
+                            apply_show_desktop_immune(win, true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (win, float);
 }
 
 /// 上一次"沉到桌面层"的时间（节流用）
@@ -1965,6 +2089,8 @@ const DEFAULT_BOX_H: i32 = 250;
 /// 胶囊模式的窗口尺寸（**逻辑**像素；建窗 / 收起时乘 scale factor 变物理像素）。
 const CAPSULE_W: f64 = 150.0;
 const CAPSULE_H: f64 = 34.0;
+/// 饼型菜单圆钮的窗口尺寸（逻辑像素）。
+const RADIAL_BTN: f64 = 54.0;
 
 /// 胶囊尺寸（物理像素）。
 fn capsule_size(sf: f64) -> (i32, i32) {
@@ -1972,6 +2098,19 @@ fn capsule_size(sf: f64) -> (i32, i32) {
         (CAPSULE_W * sf).round().max(40.0) as i32,
         (CAPSULE_H * sf).round().max(24.0) as i32,
     )
+}
+
+/// 饼型菜单圆钮尺寸（物理像素）。
+fn radial_btn_size(sf: f64) -> (i32, i32) {
+    (
+        (RADIAL_BTN * sf).round().max(40.0) as i32,
+        (RADIAL_BTN * sf).round().max(40.0) as i32,
+    )
+}
+
+/// 该分区是不是饼型菜单（radial_style 非空）。
+fn is_radial(cfg: Option<&BoxWindowCfg>) -> bool {
+    cfg.map(|c| !c.radial_style.is_empty()).unwrap_or(false)
 }
 
 /// 由配置决定窗口几何：`(w, h, visible, locked, 配置是否不可用)`。
@@ -2082,10 +2221,14 @@ fn open_box_window_with_cfg(
     // 此时按胶囊尺寸建窗（下面建好后按 scale factor 校正物理尺寸），
     // 展开几何从 expanded_geom 恢复，cfg.w/h 不参与。
     let collapsed = cfg.as_ref().map(|c| c.collapsed).unwrap_or(false);
+    let radial = is_radial(cfg.as_ref());
+    // 逻辑像素估算值（建窗后按真实 scale factor 校正）：
+    // 胶囊 = 胶囊尺寸；饼型菜单 = 圆钮尺寸（它永远处于收起语义）
     let (w, h, visible, locked, degenerate) = if collapsed {
+        let (lw, lh) = if radial { (RADIAL_BTN, RADIAL_BTN) } else { (CAPSULE_W, CAPSULE_H) };
         (
-            CAPSULE_W as i32,
-            CAPSULE_H as i32,
+            lw as i32,
+            lh as i32,
             cfg.as_ref().map(|c| c.visible).unwrap_or(true),
             cfg.as_ref().map(|c| c.locked).unwrap_or(false),
             false,
@@ -2146,7 +2289,7 @@ fn open_box_window_with_cfg(
     // 普通分区：配置存的就是物理像素，直接用（下限兜底防退化）。
     if collapsed {
         if let Ok(sf) = win.scale_factor() {
-            let (cw, ch) = capsule_size(sf);
+            let (cw, ch) = if radial { radial_btn_size(sf) } else { capsule_size(sf) };
             let _ = win.set_size(PhysicalSize::new(cw.max(1) as u32, ch.max(1) as u32));
         }
     } else {
@@ -2264,10 +2407,10 @@ fn open_box_window_with_cfg(
 /// 为数据库中所有分区创建窗口
 pub fn open_all_box_windows(app: &AppHandle, db: &Db) -> Result<(), String> {
     // 一次查询取全部分区（含类型），避免逐个分区再查一次
-    let list: Vec<(i64, String, String, String)> = {
+    let list: Vec<(i64, String, String, String, i64)> = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, color, type FROM boxes ORDER BY id")
+            .prepare("SELECT id, name, color, type, nested_in FROM boxes ORDER BY id")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -2276,6 +2419,7 @@ pub fn open_all_box_windows(app: &AppHandle, db: &Db) -> Result<(), String> {
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -2288,7 +2432,7 @@ pub fn open_all_box_windows(app: &AppHandle, db: &Db) -> Result<(), String> {
     let mut to_show: Vec<tauri::WebviewWindow> = Vec::new();
     // 当前库里真实存在的分区 id：稍后用它清扫"幽灵窗口"（见 sweep_ghost_box_windows）
     let mut valid_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    for (id, name, color, box_type) in list {
+    for (id, name, color, box_type, nested_in) in list {
         valid_ids.insert(id);
         // 启动时刷新已有分区文件夹的隐藏属性（Windows 有时会把它重置掉），
         // 桌面只显示透明面板。
@@ -2300,12 +2444,19 @@ pub fn open_all_box_windows(app: &AppHandle, db: &Db) -> Result<(), String> {
             }
         }
         let cfg = cfgs.iter().find(|c| c.id == id).cloned();
-        if let Some(win) = open_box_window_with_cfg(app, db, id, &name, &color, cfg, true)? {
-            to_show.push(win);
+        let win = open_box_window_with_cfg(app, db, id, &name, &color, cfg, true)?;
+        // 嵌套的饼型分区：窗口照常创建（脚本活着，点条目能秒弹），
+        // 但绝不进批量显示 —— 它的可见性只由 nested_in 决定。
+        if nested_in == 0 {
+            if let Some(w) = win {
+                to_show.push(w);
+            }
         }
     }
     // 全部分区窗口就绪后一次性显示：每个 WebView2 要几百毫秒初始化，
     // 逐个显示会让桌面"噼里啪啦"弹 N 次；批量显示只有一次视觉变化。
+    // （嵌套饼型分区的窗口虽然建了，但 visible=false 不会进 to_show，
+    //   点宿主分区里的条目时才按需显示 —— 见 open_nested_radial。）
     for w in to_show {
         let _ = w.show();
     }
@@ -2379,20 +2530,105 @@ pub fn sweep_ghost_box_windows(app: &AppHandle, valid_ids: &std::collections::Ha
 }
 
 /// 显示/隐藏单个分区窗口
+/// 显示 / 隐藏一个分区窗口（托盘菜单、主窗口的开关都会走这里）。
+///
+/// 嵌套中的饼型分区（nested_in != 0）不可见性由嵌套关系决定：显示它会把圆钮
+/// 从宿主列表里"漏"到桌面上，所以显示请求直接忽略（隐藏请求无害，放行）。
 pub fn set_box_visible(app: &AppHandle, box_id: i64, visible: bool) -> Result<(), String> {
+    let db = app.state::<Db>();
+    if visible {
+        let nested: i64 = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            conn.query_row(
+                "SELECT nested_in FROM boxes WHERE id = ?1",
+                rusqlite::params![box_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0)
+        };
+        if nested != 0 {
+            crate::log_msg(&format!("分区 #{box_id} 嵌套在宿主分区里，忽略显示请求"));
+            return Ok(());
+        }
+    }
     let bw = app.state::<BoxWindows>();
     let label = bw
         .label_for(box_id)
         .ok_or_else(|| "分区窗口不存在".to_string())?;
     if let Some(win) = app.get_webview_window(&label) {
         if visible {
+            // 只显示、不抢焦点：分区钉在桌面层，setFocus 会把它抬到最顶层，
+            // 随后又被守护逻辑沉回去 —— 白闪一次
             win.show().map_err(|e| e.to_string())?;
-            win.set_focus().map_err(|e| e.to_string())?;
         } else {
             hide_win(&win);
         }
         persist_cfg(&win, box_id, true);
     }
+    Ok(())
+}
+
+/// 嵌套饼型分区的窗口隐藏 / 显示。
+///
+/// **不写 cfg.visible**：嵌套分区的可见性完全由 boxes.nested_in 决定 ——
+/// 启动时嵌套的一律不显示，退出落盘的 visible 值对它没有意义；
+/// 若照常落盘 visible=false，解嵌后重启分区就再也不出现了。
+pub fn set_radial_window_hidden(app: &AppHandle, box_id: i64, hidden: bool) -> Result<(), String> {
+    let bw = app.state::<BoxWindows>();
+    let label = bw
+        .label_for(box_id)
+        .ok_or_else(|| "分区窗口不存在".to_string())?;
+    if let Some(win) = app.get_webview_window(&label) {
+        if hidden {
+            hide_win(&win);
+        } else {
+            win.show().map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// 打开一个嵌套的饼型分区（用户在宿主分区里点了它的圆钮条目）。
+///
+/// 圆钮窗口此刻是隐藏的：确保窗口存在（启动时嵌套分区也照常建窗，这里只是兜底），
+/// 把圆钮中心挪到点击位置（夹回工作区），显示后发 `nested-radial-open`，
+/// 由它自己的前端弹出展开环。窗口已可见时不重复挪位（展开中挪动会
+/// 破坏"圆钮钉死不动"的约束），只补发一次展开事件。
+pub fn open_nested_radial(app: &AppHandle, box_id: i64, cx: i32, cy: i32) -> Result<(), String> {
+    let db = app.state::<Db>();
+    let label = format!("box-{box_id}");
+    let already_visible = app
+        .get_webview_window(&label)
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false);
+    if !already_visible {
+        let win = match app.get_webview_window(&label) {
+            Some(w) => w,
+            None => {
+                // 窗口不在（异常兜底）：查元信息补建一个隐藏窗
+                let (name, color): (String, String) = {
+                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                    conn.query_row(
+                        "SELECT name, color FROM boxes WHERE id = ?1",
+                        rusqlite::params![box_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .map_err(|_| "分区不存在".to_string())?
+                };
+                let cfg = db.get_box_window_cfg(box_id)?;
+                open_box_window_with_cfg(app, &db, box_id, &name, &color, cfg, true)?;
+                app.get_webview_window(&label)
+                    .ok_or_else(|| "创建分区窗口失败".to_string())?
+            }
+        };
+        let size = win.outer_size().map_err(|e| e.to_string())?;
+        let (w, h) = (size.width.max(1) as i32, size.height.max(1) as i32);
+        let wa = work_area_at(cx, cy);
+        let (nx, ny) = clamp_into(wa, cx - w / 2, cy - h / 2, w, h);
+        let _ = win.set_position(PhysicalPosition::new(nx, ny));
+        win.show().map_err(|e| e.to_string())?;
+    }
+    let _ = app.emit_to(&label, "nested-radial-open", box_id);
     Ok(())
 }
 
@@ -2433,6 +2669,13 @@ pub fn set_box_collapsed(app: &AppHandle, box_id: i64, collapsed: bool) -> Resul
     let cfg = db
         .get_box_window_cfg(box_id)?
         .unwrap_or_else(|| BoxWindowCfg::new(box_id));
+
+    // 饼型菜单分区没有"永久收起/展开"语义：平时永远是圆钮，单击弹出只是
+    // 前端临时放大窗口。菜单里的「收起/展开」对它不做任何事，避免把
+    // 圆钮尺寸配置写成胶囊或展开几何。
+    if !cfg.radial_style.is_empty() {
+        return Ok(());
+    }
 
     if collapsed {
         if cfg.collapsed {

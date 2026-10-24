@@ -42,6 +42,17 @@ const ICONS = {
       <path d="M8 5.4v5.2M5.4 8h5.2" />
     </svg>
   ),
+  addRadial: (
+    <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <circle cx="8" cy="8" r="2" />
+      <circle cx="8" cy="2.8" r="1.35" />
+      <circle cx="12.3" cy="5.4" r="1.35" />
+      <circle cx="12.3" cy="10.6" r="1.35" />
+      <circle cx="8" cy="13.2" r="1.35" />
+      <circle cx="3.7" cy="10.6" r="1.35" />
+      <circle cx="3.7" cy="5.4" r="1.35" />
+    </svg>
+  ),
   organize: (
     <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.4">
       <path d="M2.5 4.5h7M2.5 8h11M11.5 11.5h2" />
@@ -148,6 +159,7 @@ export default function TrayMenuWindow() {
   const items: (MenuItemDef | typeof SEP)[] = [
     { key: "toggle", label: "显示 / 隐藏全部分区", icon: ICONS.toggle },
     { key: "add", label: "新建分区", icon: ICONS.add },
+    { key: "addRadial", label: "新建饼型菜单", icon: ICONS.addRadial },
     { key: "organize", label: "一键整理", hint: "预览后移动", icon: ICONS.organize },
     {
       key: "autostart",

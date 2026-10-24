@@ -1186,11 +1186,516 @@ body {
   user-select: none;
   overflow: hidden;
   white-space: nowrap;
+  /* 悬停高亮/阴影的过渡：150ms 与悬停展开的触发延迟一致，手感统一 */
+  transition: background 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
 }
 
 .box-capsule:hover {
   background: var(--box-bg-hover, rgba(255, 255, 255, 0.95));
   border-color: rgba(90, 140, 160, 0.75);
+  box-shadow: 0 3px 12px rgba(20, 50, 60, 0.18);
+}
+
+/* ============ 饼型菜单分区（radial） ============ */
+
+/* 圆钮态：54px 圆钮，分区色描边 + 名字缩写 */
+.radial-btn {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 3px;
+  box-sizing: border-box;
+  background: var(--box-bg, rgba(255, 255, 255, 0.9));
+  border: 2px solid rgba(255, 255, 255, 0.65);
+  box-shadow: 0 2px 10px rgba(20, 50, 60, 0.2), inset 0 0 0 3px rgba(255, 255, 255, 0.35);
+  cursor: pointer;
+  user-select: none;
+  overflow: hidden;
+  transition: box-shadow 150ms ease, transform 150ms ease;
+}
+.radial-btn:hover {
+  box-shadow: 0 4px 16px rgba(20, 50, 60, 0.3), inset 0 0 0 3px rgba(255, 255, 255, 0.35);
+}
+.radial-btn--icon:hover {
+  box-shadow: none;
+}
+.radial-btn:active {
+  transform: scale(0.93);
+}
+.radial-btn--icon:active {
+  transform: scale(0.95);
+}
+.radial-btn.drag-over {
+  border-color: #0067c0;
+  box-shadow: 0 0 0 3px rgba(0, 103, 192, 0.35), 0 4px 16px rgba(20, 50, 60, 0.3);
+}
+.radial-btn-dot {
+  display: none;
+}
+/* 圆钮名字：白描边 + 半透明底片，任何壁纸/分区色上都读得清。
+   字号随圆钮直径走（CSS 变量由 BoxWindow 按 radialPref.size 写入）。 */
+.radial-btn-name {
+  font-size: calc(var(--radial-btn-size, 54px) * 0.24);
+  font-weight: 700;
+  color: #1d323c;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.8);
+  max-width: 86%;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.25;
+}
+/* 长名字换行兜底：一行装不下缩到 2 行内仍可读（仅 72px 以上大圆钮） */
+.radial-btn--lg .radial-btn-name {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  text-align: center;
+}
+.radial-btn-count {
+  font-size: 10px;
+  color: #5d7a86;
+  line-height: 1;
+}
+/* 宿主分区里嵌套饼型分区的迷你圆钮条目：分区色圆底 + 全局饼型图标 */
+.box-win-nested-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  overflow: hidden;
+  flex: none;
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.55), 0 1px 4px rgba(20, 50, 60, 0.25);
+}
+.box-win-nested-dot img {
+  width: 78%;
+  height: 78%;
+  object-fit: contain;
+  -webkit-user-drag: none;
+}
+/* 嵌套条目本体：可点、悬停有轻微反馈（和普通图标一致的手感） */
+.box-win-item-nested {
+  cursor: pointer;
+}
+.box-win-item-nested:hover .box-win-nested-dot {
+  transform: scale(1.06);
+}
+.box-win-nested-dot {
+  transition: transform 120ms ease;
+}
+/* 嵌套条目右键小菜单：跟随系统风格的迷你浮层 */
+.box-win-nested-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 132px;
+  padding: 4px;
+  background: rgba(249, 249, 249, 0.97);
+  border: 1px solid rgba(0, 0, 0, 0.09);
+  border-radius: 8px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.18);
+  box-sizing: border-box;
+}
+.box-win-nested-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  font-size: 12px;
+  color: #1d1d1f;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.box-win-nested-menu-item:hover {
+  background: rgba(0, 103, 192, 0.1);
+}
+/* 圆钮自定义图标（设置页配置）：就是一个正常桌面图标 —— 没有任何圆形底、
+   描边、容器阴影；悬停时图标上层浮现文件数量角标 */
+.radial-btn--icon {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  overflow: visible;
+}
+.radial-btn--icon .radial-btn-icon {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+  object-fit: contain;
+  filter: none;
+}
+/* 悬停反馈：仅轻微放大，不加任何投影（图标本体是圆角方形，
+   drop-shadow 会描出一圈方形影子，观感像多了一层） */
+.radial-btn--icon:hover {
+  background: transparent;
+  box-shadow: none;
+  transform: scale(1.06);
+}
+.radial-btn--icon:hover .radial-btn-icon {
+  filter: none;
+}
+/* 图标模式：数量角标默认隐藏，悬停时叠加在图标正中心（深色圆底白字，
+   压在图标上依然清晰） */
+.radial-btn--icon .radial-btn-count {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%) scale(0.8);
+  min-width: 42%;
+  padding: 6% 9%;
+  box-sizing: border-box;
+  border-radius: 999px;
+  background: rgba(20, 40, 52, 0.72);
+  color: #fff;
+  font-size: calc(var(--radial-btn-size, 54px) * 0.3);
+  font-weight: 700;
+  text-align: center;
+  line-height: 1;
+  box-shadow: 0 1px 4px rgba(0, 30, 60, 0.35);
+  opacity: 0;
+  transition: opacity 140ms ease, transform 140ms ease;
+  pointer-events: none;
+  backdrop-filter: blur(2px);
+}
+.radial-btn--icon:hover .radial-btn-count,
+.radial-btn--icon.show-count .radial-btn-count {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+/* 图标模式拖文件悬停提示：蓝色光圈代替边框 */
+.radial-btn--icon.drag-over {
+  box-shadow: 0 0 0 3px rgba(0, 103, 192, 0.45);
+  border-radius: 14%;
+}
+/* 展开态中心钮的自定义图标 */
+.radial-center-icon {
+  width: 30px;
+  height: 30px;
+  object-fit: contain;
+  border-radius: 50%;
+  background: #fff;
+  padding: 2px;
+  box-sizing: border-box;
+}
+
+/* 展开态舞台：透明容器，中心圆钮绝对居中。
+   绽放/收拢都在 stage 上做 CSS 动画 —— 窗口几何一次性设好，
+   逐帧只动 DOM，窗口绝不抖。 */
+.radial-stage {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  transform-origin: 50% 50%;
+  animation: radial-stage-in 240ms cubic-bezier(0.22, 1.2, 0.36, 1) both;
+}
+.radial-stage.radial-closing {
+  animation: radial-stage-out 140ms ease-in both;
+  pointer-events: none;
+}
+@keyframes radial-stage-in {
+  from {
+    opacity: 0;
+    transform: scale(0.35);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes radial-stage-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.3);
+  }
+}
+/* 舞台完全透明：pie/rect 的区别只在围绕路径（圆形一圈 vs 矩形四边一圈），
+   grid 是旧方形卡片样式（仅兼容）。背后不放任何大背景框，气泡/卡片直接浮在桌面上。
+   drag-over 虚线框仅拖文件时出现（交互提示，非常驻背景）。 */
+.radial-stage--pie {
+  border-radius: 50%;
+}
+.radial-stage--grid {
+  border-radius: 14px;
+}
+/* 矩形围绕：拖放提示框跟随矩形路径形状 */
+.radial-stage--rect {
+  border-radius: 14px;
+}
+.radial-stage.drag-over {
+  outline: 2px dashed rgba(0, 103, 192, 0.55);
+  outline-offset: -6px;
+}
+.radial-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.7);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  cursor: pointer;
+  user-select: none;
+  box-shadow: 0 3px 12px rgba(20, 50, 60, 0.28);
+  transition: box-shadow 150ms ease;}
+.radial-center:hover {
+  box-shadow: 0 5px 18px rgba(20, 50, 60, 0.36);
+}
+/* 中心钮尺寸跟随圆钮直径设置，与桌面圆钮保持一致观感 */
+.radial-center {
+  width: var(--radial-btn-size, 54px);
+  height: var(--radial-btn-size, 54px);
+  font-size: calc(var(--radial-btn-size, 54px) * 0.24);
+}
+/* 图标模式中心钮：与桌面圆钮完全同款 —— 纯图标、无底片无边框，展开前后不变样 */
+.radial-center--icon {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+.radial-center--icon:hover {
+  box-shadow: none;
+  transform: translate(-50%, -50%) scale(1.06);
+}
+.radial-center--icon .radial-center-icon {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+  object-fit: contain;
+  /* 图标本体是圆角方形位图，不能再叠圆形裁剪（否则展开后四角被切掉） */
+  border-radius: 0;
+}
+.radial-center:active {
+  transform: translate(-50%, -50%) scale(0.92);
+}
+
+/* 饼型：每个气泡挂在一个绝对居中的旋转臂上，臂转到位后气泡转回来保持正立。
+   臂本身不做动画（绽放由 stage 统一），避免 transform 叠加抖动。 */
+.radial-orbit {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+}
+/* 锚点居中：把气泡/卡片中心（而非左上角）钉在环上，
+   所有文件中心到中心图标的距离严格一致 */
+.radial-anchor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: max-content;
+  transform: translate(-50%, -50%);
+  display: flex;
+}
+
+/* 气泡：白底圆片 + 图标 + 名字，弹出时从中心飞向外圈并淡入（丝滑关键）。
+   尺寸跟随设置「文件尺寸」(--radial-item-size，stage 上写入)。 */
+.radial-bubble {
+  --i: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: var(--radial-item-size, 66px);
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  animation: radial-bubble-in 300ms cubic-bezier(0.22, 1.1, 0.36, 1) both;
+  animation-delay: calc(var(--i) * 28ms);
+}
+.radial-bubble-icon {
+  width: var(--radial-item-size, 66px);
+  height: var(--radial-item-size, 66px);
+  /* 系统图标原样直出：无白底框/描边/投影，与普通分区图标观感一致 */
+  object-fit: contain;
+  transition: transform 140ms ease;
+}
+.radial-noicon {
+  font-size: 20px;
+  color: #4a6a78;
+}
+.radial-bubble:hover .radial-bubble-icon {
+  transform: scale(1.14);
+}
+.radial-bubble:active .radial-bubble-icon {
+  transform: scale(1.02);
+}
+.radial-bubble-name {
+  max-width: 70px;
+  font-size: 11px;
+  color: #233a44;
+  background: rgba(255, 255, 255, 0.85);
+  border-radius: 8px;
+  padding: 1px 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 方形网格形式：气泡网格居中排布，同样逐个淡入
+   （grid 已改为绕主圆环绕，这段仅保留兼容旧引用） */
+.radial-grid {
+  position: absolute;
+  inset: 64px 24px 24px;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  justify-content: center;
+  gap: 12px 10px;
+  overflow: hidden;
+}
+.radial-grid .radial-bubble {
+  width: 78px;
+}
+.radial-grid .radial-bubble-name {
+  max-width: 76px;
+}
+
+/* 菜单里的内置图标网格：缩小一号 */
+.radial-preset-grid--menu {
+  padding: 2px 4px;
+}
+.radial-preset-grid--menu .radial-preset-item {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  padding: 1px;
+}
+.radial-preset-grid--menu .radial-preset-item img {
+  border-radius: 10px;
+}
+
+/* 气泡从中心飞出：orbit 臂负责定位，bubble 从中心点起跳 */
+@keyframes radial-bubble-in {
+  from {
+    opacity: 0;
+    scale: 0.25;
+  }
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+
+/* 方形环绕：圆角方卡片（图标 + 文件名），同样绕主圆一圈。
+   文件名超长 → 单行省略号，悬停 title 提示全名。尺寸跟随「文件尺寸」。 */
+.radial-card {
+  --i: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: calc(var(--radial-item-size, 66px) + 10px);
+  padding: 7px 4px 6px;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(90, 140, 160, 0.35);
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(20, 50, 60, 0.16);
+  cursor: pointer;
+  animation: radial-bubble-in 300ms cubic-bezier(0.22, 1.1, 0.36, 1) both;
+  animation-delay: calc(var(--i) * 28ms);
+  transition: transform 140ms ease, box-shadow 140ms ease;
+}
+.radial-card:hover {
+  transform: scale(1.08);
+  box-shadow: 0 4px 14px rgba(20, 50, 60, 0.26);
+}
+.radial-card:active {
+  transform: scale(1.0);
+}
+.radial-card-icon {
+  width: var(--radial-item-size, 66px);
+  height: var(--radial-item-size, 66px);
+  object-fit: contain;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.radial-card-name {
+  max-width: calc(var(--radial-item-size, 66px) - 2px);
+  font-size: 11px;
+  color: #233a44;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 仅图标模式：气泡/卡片收紧成纯图标（按设置尺寸的 0.82 倍），悬停 title 仍提示全名 */
+.radial-bubble--iconly,
+.radial-bubble--iconly .radial-bubble-icon {
+  width: calc(var(--radial-item-size, 66px) * 0.82);
+  height: calc(var(--radial-item-size, 66px) * 0.82);
+}
+.radial-bubble--iconly {
+  padding: 0;
+}
+.radial-card--iconly {
+  width: calc(var(--radial-item-size, 66px) * 0.9);
+  height: calc(var(--radial-item-size, 66px) * 0.9);
+  padding: 4px;
+  justify-content: center;
+}
+.radial-card--iconly .radial-card-icon {
+  width: calc(var(--radial-item-size, 66px) * 0.72);
+  height: calc(var(--radial-item-size, 66px) * 0.72);
+}
+
+/* 设置页：饼型内置图标选择网格 */
+.radial-preset-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.radial-preset-item {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  border: 2px solid transparent;
+  background: none;
+  padding: 2px;
+  cursor: pointer;
+  transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.radial-preset-item img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border-radius: 12px;
+}
+.radial-preset-item:hover {
+  transform: translateY(-2px);
+  background: rgba(0, 103, 192, 0.08);
+}
+.radial-preset-item.active {
+  border-color: #0067c0;
+  background: rgba(0, 103, 192, 0.1);
 }
 
 /* 文件拖到胶囊上：高亮提示可丢进来 */
@@ -1995,17 +2500,18 @@ body {
   box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.9);
 }
 
-/* 标题栏按钮：白底 + 描边 + 深色图标，任何时候都看得见 */
-.box-window:hover .box-win-lockbtn,
-.box-window:hover .box-win-more,
-.box-window:hover .box-win-btn {
+/* 标题栏按钮：白底 + 描边 + 深色图标，**始终固定**（不随悬停/壁纸变化），
+   深色壁纸上不悬停也看得见 */
+.box-window .box-win-lockbtn,
+.box-window .box-win-more,
+.box-window .box-win-btn {
   background: #ffffff;
   border: 1px solid rgba(100, 135, 145, 0.35);
   color: #1f3b43;
   box-shadow: 0 1px 2px rgba(15, 45, 55, 0.16);
 }
 
-.box-window:hover .box-win-btn {
+.box-window .box-win-btn {
   font-size: 16px;
   font-weight: 700;
 }
@@ -2023,9 +2529,9 @@ body {
   color: #ffffff;
 }
 
-/* 已锁定 / 降序排列：用实心色标出来，状态一眼可见 */
-.box-window:hover .box-win-lockbtn.locked,
-.box-window:hover .box-win-lockbtn.on {
+/* 已锁定 / 降序排列：用实心色标出来（始终固定，不随悬停变化），状态一眼可见 */
+.box-window .box-win-lockbtn.locked,
+.box-window .box-win-lockbtn.on {
   background: var(--primary);
   border-color: var(--primary);
   color: #ffffff;
