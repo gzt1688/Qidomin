@@ -16,6 +16,15 @@
   <img src="https://img.shields.io/badge/Backend-Rust-orange" alt="Rust" />
 </p>
 
+<p align="center">
+  <b>Desktop organizer for Windows — transparent draggable zones to group icons &amp; files into clean categories.</b><br/>
+  A free, open-source alternative to Stardock Fences. Built with Tauri 2 + React + Rust.
+</p>
+
+<p align="center">
+  <b>Like Qidomin? Please ⭐ Star this repo!</b>
+</p>
+
 ---
 
 ## 📖 简介
